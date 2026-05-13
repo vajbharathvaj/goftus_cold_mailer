@@ -1,0 +1,6 @@
+.env
+node_modules/
+.chrome-automation/
+.chrome-automation-runtime/
+.chrome-automation-test/
+storage/

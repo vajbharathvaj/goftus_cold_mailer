@@ -1,0 +1,344 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Cold Mailbot</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500;600;700&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <main class="app-shell">
+      <aside class="sidebar">
+        <div class="sidebar-brand">
+          <p class="brand-title">COLDMAILBOT</p>
+          <span class="brand-version">v1.1</span>
+        </div>
+
+        <nav class="sidebar-nav" aria-label="Main navigation">
+          <button class="nav-item active" type="button" data-view="campaign">
+            <span class="nav-icon">[C]</span>
+            <span>Campaign</span>
+          </button>
+          <button class="nav-item" type="button" data-view="warmup">
+            <span class="nav-icon">[W]</span>
+            <span>Warmup</span>
+          </button>
+        </nav>
+
+        <div class="sidebar-status" aria-live="polite">
+          <button id="ollamaStatus" class="status-line" type="button">
+            <span class="dot dot-amber" id="ollamaDot"></span>
+            <span>Ollama</span>
+            <small id="ollamaText">Checking</small>
+          </button>
+          <button id="mailStatus" class="status-line" type="button">
+            <span class="dot dot-amber" id="mailDot"></span>
+            <span>Mail</span>
+            <small id="mailText">Checking</small>
+          </button>
+          <button id="chromeCookiesStatus" class="status-line" type="button">
+            <span class="dot dot-amber" id="chromeDot"></span>
+            <span>Chrome Cookies</span>
+            <small id="chromeText">Checking</small>
+          </button>
+        </div>
+      </aside>
+
+      <section class="main-area">
+        <header class="topbar panel">
+          <div>
+            <p class="mono-label" id="breadcrumb">Cold Mailbot / The Mailer</p>
+            <h1 class="topbar-title" id="pageTitle">Content Console</h1>
+          </div>
+          <div class="topbar-actions">
+            <button id="refreshHealth" class="btn btn-ghost" type="button">Refresh Status</button>
+          </div>
+        </header>
+
+        <section id="mailerView" class="view" hidden>
+          <div class="mailer-grid">
+            <article class="panel mailer-input-panel">
+              <div class="panel-head">
+                <h2>Lead Input</h2>
+              </div>
+
+              <form id="leadForm" class="form-grid">
+                <label>Company Name<input name="companyName" required /></label>
+                <label>Website URL<input name="websiteUrl" type="url" required /></label>
+                <label>Industry<input name="industry" required /></label>
+                <label>Target Persona<input name="targetPersona" required /></label>
+                <label class="full">Company Description<textarea name="companyDescription" rows="3" required></textarea></label>
+                <label class="full">LinkedIn Summary<textarea name="linkedInSummary" rows="2"></textarea></label>
+                <label class="full">Trigger Detail<textarea name="prospectContextDetails" rows="2"></textarea></label>
+                <label>Operational Area<input name="operationalArea" /></label>
+                <label class="full">Pain Hypothesis<textarea name="painHypothesis" rows="2" required></textarea></label>
+                <label class="full">Service Angle<textarea name="yourServiceAngle" rows="2" required></textarea></label>
+                <label class="full">Product / Service<textarea name="productOrService" rows="2"></textarea></label>
+                <label class="full">Primary Outcome<textarea name="primaryOutcome" rows="2"></textarea></label>
+                <label class="full">Front-End Deliverable<textarea name="frontEndOfferDeliverable" rows="2"></textarea></label>
+                <label>Time / Effort<input name="timeOrEffortConstraint" /></label>
+                <label>Objection<input name="objectionToPreHandle" /></label>
+              </form>
+
+              <div class="action-row">
+                <button id="fillSample" class="btn btn-ghost" type="button">Load Sample</button>
+                <button id="testHealth" class="btn btn-ghost" type="button">Health</button>
+                <button id="generateDraft" class="btn btn-ghost" type="button">Generate Draft</button>
+                <button id="generateSubject" class="btn btn-ghost" type="button">Generate Subject</button>
+                <button id="generateVariants" class="btn btn-ghost" type="button">Generate Variants</button>
+                <button id="generateFull" class="btn btn-primary" type="button">Generate Full</button>
+              </div>
+
+              <div class="draft-progress-wrap" aria-live="polite">
+                <div class="draft-progress-meta">
+                  <span class="mono-label">Draft Progress</span>
+                  <span class="mono-label" id="draftProgressText">Idle</span>
+                </div>
+                <div class="draft-progress-track">
+                  <div id="draftProgressBar" class="draft-progress-bar"></div>
+                </div>
+              </div>
+            </article>
+
+            <article class="panel mailer-result-panel">
+              <div class="panel-head">
+                <h2>Output</h2>
+                <div class="status-pills">
+                  <span id="statusBadge" class="pill pill-idle">IDLE</span>
+                  <span id="complianceBadge" class="pill pill-idle">No checks</span>
+                </div>
+              </div>
+
+              <details class="result-block" open>
+                <summary>
+                  <span>Subject</span>
+                  <button class="copy-btn" type="button" data-copy-target="subjectOutput">Copy</button>
+                </summary>
+                <pre id="subjectOutput" class="output mono">No subject yet.</pre>
+              </details>
+
+              <details class="result-block" open>
+                <summary>
+                  <span>Body</span>
+                  <button class="copy-btn" type="button" data-copy-target="bodyOutput">Copy</button>
+                </summary>
+                <pre id="bodyOutput" class="output mono">No body yet.</pre>
+              </details>
+
+              <details class="result-block" open>
+                <summary>
+                  <span>Compliance</span>
+                  <button class="copy-btn" type="button" data-copy-target="complianceOutput">Copy</button>
+                </summary>
+                <pre id="complianceOutput" class="output mono">No compliance data yet.</pre>
+              </details>
+
+              <details class="result-block" open>
+                <summary>
+                  <span>Variants</span>
+                  <button class="copy-btn" type="button" data-copy-target="variantsOutput">Copy</button>
+                </summary>
+                <div id="variantsOutput" class="variants-wrap">
+                  <p class="muted">No variants yet.</p>
+                </div>
+              </details>
+
+              <details class="result-block" open>
+                <summary>
+                  <span>Raw API Response</span>
+                  <button class="copy-btn" type="button" data-copy-target="rawOutput">Copy</button>
+                </summary>
+                <pre id="rawOutput" class="output mono">No response yet.</pre>
+              </details>
+
+              <details class="result-block" open>
+                <summary>
+                  <span>Send Preview</span>
+                </summary>
+                <div id="sendPreviewCard" class="send-preview-card muted">
+                  Generate a campaign row preview to see final email assembly.
+                </div>
+              </details>
+            </article>
+          </div>
+        </section>
+
+        <section id="campaignView" class="view">
+          <article class="panel upload-zone-panel">
+            <div id="uploadZone" class="upload-zone" tabindex="0" role="button" aria-label="Upload campaign file">
+              <p class="upload-title">Drop spreadsheet here or click to upload</p>
+              <p class="upload-sub">.csv .xls .xlsx accepted</p>
+              <p id="uploadStateText" class="upload-state">No file selected</p>
+            </div>
+            <input id="campaignFile" type="file" accept=".xlsx,.xls,.csv" hidden />
+
+            <div class="upload-controls">
+              <label>Rows to process
+                <input id="campaignCount" type="number" min="1" value="10" />
+              </label>
+              <label>Draft iterations
+                <input id="draftIterations" type="number" min="1" value="1" />
+              </label>
+              <button id="startRun" class="btn btn-primary" type="button" disabled>Start Run</button>
+            </div>
+          </article>
+
+          <article id="runConsole" class="panel run-console hidden">
+            <header class="run-header">
+              <div>
+                <p class="mono-label" id="runIdLabel">RUN -</p>
+                <h2 id="runStatusTitle">No active run</h2>
+              </div>
+              <div class="run-header-actions">
+                <span id="runStatusBadge" class="status-badge status-queued">QUEUED</span>
+                <button id="pauseResumeBtn" class="btn btn-ghost" type="button">Pause</button>
+                <button id="stopRunBtn" class="btn btn-danger" type="button">Stop</button>
+                <button id="resetRunBtn" class="btn btn-ghost" type="button">Reset</button>
+                <div class="campaign-send-all">
+                  <div class="campaign-send-controls">
+                    <label class="send-all-count-label" for="sendAllCountInput">Batch</label>
+                    <input id="sendAllCountInput" type="number" min="1" step="1" value="10" />
+                    <button id="sendAllBtn" class="btn btn-primary" type="button">Send All Ready</button>
+                  </div>
+                  <span id="sendAllMeta" class="muted mono"></span>
+                </div>
+              </div>
+            </header>
+
+            <section class="run-progress">
+              <div class="progress-head">
+                <span id="runProgressText">0 / 0 rows</span>
+                <span id="runEtaText">ETA -</span>
+              </div>
+              <div class="progress-track">
+                <div id="runProgressBar" class="progress-bar"></div>
+              </div>
+              <p id="runMetaText" class="muted">Waiting for run.</p>
+            </section>
+
+            <section>
+              <div class="queue-head">
+                <h3>Queue</h3>
+                <div class="queue-head-actions">
+                  <button id="queueSelectAllBtn" class="btn btn-ghost" type="button">Select All</button>
+                  <button id="queueDeleteSelectedBtn" class="btn btn-danger" type="button">Delete Selected</button>
+                  <span id="queueSelectedMeta" class="muted mono"></span>
+                </div>
+              </div>
+              <div id="queueRows" class="queue-list"></div>
+            </section>
+          </article>
+
+          <article id="runSummary" class="panel run-summary hidden"></article>
+
+          <article class="panel history-panel">
+            <details open>
+              <summary>Previous Runs</summary>
+              <div id="historyList" class="history-list">
+                <p class="muted">No previous runs loaded.</p>
+              </div>
+            </details>
+          </article>
+        </section>
+
+        <section id="warmupView" class="view">
+          <article class="panel warmup-header-panel">
+            <div class="warmup-header-row">
+              <div>
+                <p class="mono-label">Warmup</p>
+                <h2 class="warmup-title">Email Warmup</h2>
+              </div>
+              <label class="warmup-toggle">
+                <input id="warmupStatusToggle" type="checkbox" />
+                <span class="warmup-toggle-slider"></span>
+                <span id="warmupStatusLabel" class="mono-label">Inactive</span>
+              </label>
+            </div>
+          </article>
+
+          <article class="panel warmup-run-panel">
+            <button id="warmupRunBtn" class="btn btn-primary warmup-run-btn" type="button">Run Today's Warmup</button>
+            <p id="warmupRunHint" class="muted">Trigger one warmup run per day.</p>
+          </article>
+
+          <article id="warmupProgressWrap" class="panel warmup-progress-panel hidden">
+            <div class="progress-head">
+              <span id="warmupProgressText">0 of 0 sent</span>
+            </div>
+            <div class="progress-track">
+              <div id="warmupProgressBar" class="progress-bar"></div>
+            </div>
+            <p id="warmupProgressStatus" class="muted">Waiting...</p>
+          </article>
+
+          <article class="panel warmup-stats-panel">
+            <div class="warmup-stats-grid">
+              <div class="warmup-stat-card">
+                <p class="mono-label">Sent today</p>
+                <h3 id="warmupStatSentToday">0 / 0</h3>
+              </div>
+              <div class="warmup-stat-card">
+                <p class="mono-label">Tomorrow</p>
+                <h3 id="warmupStatTomorrow">0 emails</h3>
+              </div>
+              <div class="warmup-stat-card">
+                <p class="mono-label">Days active</p>
+                <h3 id="warmupStatDaysActive">0</h3>
+              </div>
+              <div class="warmup-stat-card">
+                <p class="mono-label">Total sent</p>
+                <h3 id="warmupStatTotalSent">0</h3>
+              </div>
+            </div>
+          </article>
+
+          <article class="panel warmup-seeds-panel">
+            <div class="panel-head">
+              <h2 id="warmupSeedTitle">Seed Emails (0)</h2>
+            </div>
+            <div id="warmupSeedList" class="warmup-seed-list">
+              <p class="muted">No seed emails added yet.</p>
+            </div>
+            <div class="warmup-seed-input-row">
+              <input id="warmupSeedInput" type="email" placeholder="Add email address..." />
+              <button id="warmupSeedAddBtn" class="btn btn-primary" type="button">Add</button>
+            </div>
+            <p id="warmupSeedError" class="warmup-inline-error hidden"></p>
+          </article>
+
+          <article class="panel warmup-history-panel">
+            <div class="panel-head">
+              <h2>Warmup History</h2>
+            </div>
+            <div class="warmup-history-wrap">
+              <table class="warmup-history-table">
+                <thead>
+                  <tr>
+                    <th>Date</th>
+                    <th>Sent</th>
+                    <th>Replies</th>
+                  </tr>
+                </thead>
+                <tbody id="warmupHistoryBody"></tbody>
+              </table>
+              <p id="warmupHistoryEmpty" class="muted">No history yet</p>
+            </div>
+            <div class="warmup-replies-row">
+              <button id="warmupCheckRepliesBtn" class="btn btn-ghost" type="button">Check Replies Now</button>
+              <p id="warmupCheckRepliesResult" class="muted"></p>
+            </div>
+          </article>
+        </section>
+      </section>
+    </main>
+
+    <script src="/app.js"></script>
+    <script src="/warmup.js"></script>
+  </body>
+</html>

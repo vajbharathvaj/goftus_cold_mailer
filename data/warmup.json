@@ -1,0 +1,42 @@
+{
+  "status": "active",
+  "startedAt": null,
+  "currentDailyVolume": 16,
+  "todaySentCount": 7,
+  "lastRunDate": "2026-03-22",
+  "seedEmails": [
+    "vajbharath665@gmail.com",
+    "spykd06@gmail.com",
+    "surprisefoyouu@gmail.com",
+    "ganesangurukal120@gmail.com",
+    "privaterozz123@gmail.com",
+    "yohaibro123@gmail.com",
+    "sumanthirajaram4@gmail.com",
+    "arshwathanivethar@gmail.com",
+    "akiluma006@gmail.com",
+    "akiluk634@gmail.com",
+    "akilkuhan401@gmail.com",
+    "k3605017@gmail.com",
+    "a91424409@gmail.com",
+    "lkumar78367@gmail.com",
+    "arshwathajawahar@gmail.com",
+    "rsumathi249@gmail.com"
+  ],
+  "history": [
+    {
+      "date": "2026-03-20",
+      "sent": 5,
+      "replies": 3
+    },
+    {
+      "date": "2026-03-21",
+      "sent": 6,
+      "replies": 6
+    },
+    {
+      "date": "2026-03-22",
+      "sent": 7,
+      "replies": 5
+    }
+  ]
+}

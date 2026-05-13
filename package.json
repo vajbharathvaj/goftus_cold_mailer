@@ -1,0 +1,30 @@
+{
+  "name": "cold-mailbot",
+  "version": "1.1.0",
+  "description": "B2B AI-assisted outreach content creation service",
+  "main": "src/server.js",
+  "type": "commonjs",
+  "scripts": {
+    "prestart": "node scripts/kill-port.js 3000",
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "test": "node --test",
+    "test:chrome-cookies": "node scripts/test-chrome-cookies.js"
+  },
+  "engines": {
+    "node": ">=18.17"
+  },
+  "dependencies": {
+    "better-sqlite3": "^12.6.2",
+    "docx": "^9.5.1",
+    "dotenv": "^16.5.0",
+    "express": "^4.21.2",
+    "imap": "^0.8.19",
+    "nodemailer": "^8.0.1",
+    "playwright": "^1.58.2",
+    "puppeteer-core": "^24.9.0",
+    "undici": "^6.21.1",
+    "xlsx": "^0.18.5",
+    "zod": "^3.24.2"
+  }
+}

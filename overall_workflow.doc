@@ -1,0 +1,357 @@
+Cold Mailbot - Overall Workflow (Code-Accurate)
+
+Last verified from code:
+- src/server.js
+- src/services/campaignStorage.js
+- src/services/websiteFetchService.js
+- src/services/chromeProfileFetchService.js
+- src/services/mailerDocService.js
+- src/services/campaignSendService.js
+- src/services/mailerSendService.js
+- public/app.js
+
+==================================================
+1) What this system does
+==================================================
+Cold Mailbot is a local Node.js app that runs a full outbound pipeline:
+1. Ingest campaign spreadsheet rows.
+2. Fetch website context per row.
+3. Generate structured mailer fields with Ollama.
+4. Generate email preview (subject + body) with Ollama.
+5. Let user send emails row-by-row or in bulk.
+6. Persist every stage back to enriched Excel + metadata JSON + send logs.
+
+It also supports a standalone single-lead mailer mode (/api/content/* routes).
+
+==================================================
+2) Main runtime components and what each uses
+==================================================
+Backend:
+- Express server: src/server.js
+- Validation: zod schemas in src/schemas/contentSchemas.js
+
+AI generation:
+- Ollama HTTP API /api/generate via src/services/ollamaClient.js
+- Prompt templates in src/prompts/contentPrompts.js
+- Draft/subject rules in src/utils/contentRules.js
+
+Campaign orchestration and persistence:
+- src/services/campaignStorage.js
+- Spreadsheet read/write: xlsx
+- Storage root: storage/campaigns/<campaignId>/
+
+Website fetching:
+- src/services/websiteFetchService.js
+- Primary active fetcher: fetchViaRealChromeProfile() in src/services/chromeProfileFetchService.js
+- Browser automation: Playwright Chromium persistent context
+
+Mailer field document:
+- src/services/mailerDocService.js
+- DOCX creation library: docx
+
+Email preview + send:
+- src/services/campaignSendService.js
+- src/services/mailerSendService.js
+- Delivery providers: Gmail SMTP (nodemailer) or Resend API
+
+Frontend:
+- public/app.js
+- Calls backend routes and manages row actions, polling, SSE, bulk send delays
+
+==================================================
+3) Boot and service wiring flow
+==================================================
+On startup (src/server.js):
+1. Load env config from src/config.js.
+2. Create two Ollama clients:
+   - content model (OLLAMA_MODEL)
+   - mailer model (OLLAMA_MAILER_MODEL)
+3. Construct services:
+   - ContentService
+   - CampaignStorage
+   - MailerDocService
+   - MailerSendService
+   - CampaignSendService
+4. Register campaign pipeline handlers into CampaignStorage:
+   - buildMailerDoc -> MailerDocService.generateForCampaignRow
+   - buildSendPreview -> CampaignSendService.buildPreviewForRow
+   - onRunStart / onRunComplete -> model unload/warmup lifecycle
+   - NOTE: sendPreparedEmail handler is NOT attached in current server wiring.
+5. Verify mail transport if configured.
+6. Serve static UI and API routes.
+
+Model lifecycle detail:
+- On run start: unload then warmup configured model(s).
+- On final run completion/stopped/failed: unload model(s).
+
+==================================================
+4) Data model and statuses
+==================================================
+Campaign-level status values:
+- running, paused, completed, stopped, failed
+
+Row-level status values:
+- queued
+- fetching
+- fetched
+- generating_mail
+- generating_preview
+- awaiting_verification (reserved path exists)
+- ready
+- sent
+- paused
+- failed
+- done (legacy normalized to ready)
+
+Email status column values commonly used:
+- pending
+- preview_ready
+- sent
+- send_failed (manual send failure path)
+- completed (set by /api/campaigns/mailer-doc route)
+
+Destination columns persisted to enriched sheet:
+- jina_content
+- jina_error
+- jina_fetch_method
+- jina_sub_pages
+- jina_fetch_trace
+- linkedin_content
+- linkedin_description
+- linkedin_error
+- email_status
+- email_to
+- email_subject
+- email_generated_body
+- email_body
+- email_previewed_at
+- email_sent_at
+- email_message_id
+- email_error
+
+Storage artifacts per campaign folder:
+- original upload file
+- enriched file (<original-stem>-enriched.<ext>)
+- metadata.json (+ metadata.json.bak)
+- mailer-row-<row>.docx files
+- send-row-<row>-<timestamp>.json files
+
+==================================================
+5) Campaign workflow: end-to-end
+==================================================
+A) Campaign creation (POST /api/campaigns)
+1. UI reads file to base64 and sends { campaignFile, count }.
+2. CampaignStorage.saveUpload():
+   - validates extension (.xlsx/.xls/.csv)
+   - writes original file to storage/campaigns/<campaignId>/
+   - reads first worksheet rows
+   - auto-detects website column (required)
+   - detects email column (optional)
+   - normalizes destination columns on rows
+   - creates queueRows for first count rows (Excel rowNumber = index + 2)
+   - writes enriched workbook
+   - writes metadata.json with status=running
+3. ensureRunProcessor(campaignId) is started immediately.
+
+B) Run processor starts
+1. processCampaignRows() loads metadata and checks target row count.
+2. If rowConcurrency > 1, it enters concurrent pipeline:
+   - fetch worker pool (claimNextFetchRow)
+   - generation worker pool (claimNextGenerationRow)
+3. If rowConcurrency == 1, it uses sequential path but same stage logic.
+
+C) Fetch stage per row
+1. Row claimed and status -> fetching.
+2. Website fetch call:
+   - enrichWebsiteContent(websiteUrl, options)
+   - fetchWebsiteContent() currently calls only fetchViaRealChromeProfile()
+3. Active fetch method behavior:
+   - fetchMethod label: chrome_profile or chrome_profile_search_test (PROFILE_SEARCH_ONLY=true)
+   - can run headless with optional headful fallback
+   - can mirror default Chrome profile into automation directory
+4. Fetched output:
+   - cleaned text
+   - internal links
+   - fetch trace
+5. Sub-page enrichment:
+   - if SUBPAGE_FETCH_ENABLED=true and not profile-search-only
+   - candidate internal links are selected
+   - each subpage fetched through same fetchWebsiteContent path
+   - combined into final content blocks
+6. Persist fetch outputs into enriched row:
+   - jina_content / jina_error / jina_fetch_method / jina_sub_pages / jina_fetch_trace
+7. Protection handling:
+   - Kasada or challenge-like warnings mark fetch as blocked/protected
+   - protected rows are set failed and skip mail generation
+
+D) Mailer doc stage per row
+1. Row status -> generating_mail.
+2. Handler calls MailerDocService.generateForCampaignRow().
+3. MailerDocService:
+   - prompts mailer Ollama model to return structured JSON fields
+   - robust JSON extraction and fallback normalization
+   - infers missing company/context values from source row/URL
+   - writes DOCX file mailer-row-<row>.docx
+4. Row metadata gets mailerFields and docFileName.
+
+E) Preview generation stage per row
+1. Row status -> generating_preview.
+2. Handler calls CampaignSendService.buildPreviewForRow().
+3. Preview flow:
+   - resolve recipient email from explicit value or source row columns
+   - reuse existing mailer fields if present, else build via mailer service
+   - generate content (combined mode preferred if enabled)
+   - fallback to split draft + subject generation
+   - fallback again to deterministic draft/subject templates when needed
+   - wrap final preview body with greeting + signature
+4. Persist preview fields:
+   - email_to
+   - email_subject
+   - email_generated_body
+   - email_body
+   - email_previewed_at
+   - email_status=preview_ready
+
+F) Optional auto-send stage in pipeline
+- CampaignStorage has a sendPreparedEmail stage hook, but server currently does not set this hook.
+- Result: campaign run auto-generates previews, but does not auto-send by default.
+
+G) Row finalization
+- If preview generated and not sent: status -> ready
+- If sent: status -> sent
+- Duration/error fields updated.
+
+H) Campaign finalization
+- When no pending rows:
+  - campaign status -> completed
+  - completedAt set
+
+==================================================
+6) Website fetch internals (current active path)
+==================================================
+fetchViaRealChromeProfile() details:
+1. Resolve Chrome executable and user-data/profile.
+2. Launch persistent context.
+3. Two operating modes:
+   - profileSearchOnly=true:
+     - open Google search for target URL
+     - open first organic result
+     - hard refresh (Ctrl+Shift+R equivalent + CDP ignore cache)
+     - close popups/cookie banners
+     - random human-like scroll
+     - capture homepage text
+     - optionally open About and Services links and capture text
+     - return combined snapshot text with source=chrome_profile_search_test
+   - profileSearchOnly=false:
+     - navigate directly to target URL (with alternate www/non-www retry)
+     - wait, handle cookie UI and popups
+     - auto-scroll and extract body text + internal links
+     - reject blocked/challenge/too-short content
+     - return cleaned text with source=chrome_profile
+4. On finish, close context.
+
+Important current behavior:
+- Manual verification UI plumbing exists at API/UI level, but current chrome fetch path logs and continues with "manual verification flow disabled" and does not emit verification events.
+
+==================================================
+7) Manual row actions in UI (after fetch/generation)
+==================================================
+Row generate preview action (public/app.js rowGenerate):
+1. POST /api/campaigns/mailer-doc
+2. POST /api/campaigns/send-preview
+3. Cache preview state in UI for inline editing
+
+Row send action (public/app.js rowSend):
+1. POST /api/campaigns/send with to/subject/body/mailerFields
+2. Backend CampaignSendService.sendPreparedEmail() calls MailerSendService.sendColdEmail()
+3. On success, backend updates row:
+   - email_sent_at, email_message_id, email_status=sent
+4. On failure, backend sets:
+   - email_status=send_failed, email_error=<reason>
+
+Bulk send action (public/app.js sendAllReadyRows):
+1. Collect send-ready rows (ready + preview exists + not already sent).
+2. Send each row sequentially.
+3. Wait random delay 1s to 10s between sends.
+4. Track sent/failed counts in UI state.
+
+==================================================
+8) Mail provider send workflow
+==================================================
+MailerSendService provider selection:
+1. If MAIL_PROVIDER=resend and RESEND_API_KEY + RESEND_FROM exist -> Resend.
+2. Else if Gmail creds exist (GMAIL_USER + GMAIL_APP_PASS/GMAIL_PASS/APP_PASS) -> Gmail SMTP.
+3. Else -> unconfigured.
+
+Send path:
+- validate to/subject/body
+- optional send delay (MAILER_SEND_DELAY_MS)
+- send via selected provider
+- return message id and accepted/rejected list
+
+==================================================
+9) Control operations workflow
+==================================================
+Pause (POST /api/campaigns/:id/pause):
+- campaign -> paused
+- active row may move to paused
+- pausedAtRow/resumeFromRow updated
+
+Resume (POST /api/campaigns/:id/resume):
+- campaign -> running
+- paused/fetching/generating/awaiting_verification rows reset to queued
+- ensureRunProcessor() starts again
+
+Stop (POST /api/campaigns/:id/stop):
+- campaign -> stopped
+- stoppedAt + resumeFromRow set
+
+Reset (POST /api/campaigns/:id/reset):
+- requires campaign not running
+- clears all enrichment + mail columns in enriched workbook
+- rows reset to queued/pending state
+- campaign status -> paused
+
+Retry row (POST /api/campaigns/:id/rows/:rowNumber/retry):
+- clears row website+email outputs
+- sets row queued/pending
+- campaign set running and processor resumes
+
+Delete rows (POST /api/campaigns/:id/rows/delete):
+- blocked while running
+- rebuilds worksheet without deleted rows
+- reindexes rowNumber (index+2)
+
+==================================================
+10) Standalone (non-campaign) content generation flow
+==================================================
+Routes:
+- POST /api/content/draft
+- POST /api/content/subject
+- POST /api/content/generate
+- POST /api/content/variants
+
+Flow:
+1. Validate lead payload with zod.
+2. Build prompt from contentPrompts.js.
+3. Call Ollama via OllamaClient streaming reader.
+4. Normalize + compliance-check outputs via contentRules.js.
+5. Return draft/subject/body/variants + compliance object.
+
+==================================================
+11) Notes on currently present but not active paths
+==================================================
+1. LinkedIn helper functions exist (query builders, description extraction), but active upload pipeline does not fetch LinkedIn content automatically.
+2. websiteFetchService contains multiple helper fetch layers (Jina, Playwright, Google cache, chrome cookies), but fetchWebsiteContent currently uses mono Chrome profile fetch path.
+3. CampaignStorage has sendPreparedEmail stage support, but server wiring currently leaves it null, so campaign run itself stops at preview-ready unless user sends manually.
+
+==================================================
+12) Practical end-to-end operator sequence
+==================================================
+1. Configure .env (Ollama + Chrome profile + mail provider).
+2. Start app (npm run dev) and open UI.
+3. Upload campaign sheet + row count.
+4. Let pipeline fetch website context and auto-generate preview-ready rows.
+5. Open row, review/edit preview.
+6. Send per row or use Send All Ready.
+7. Download enriched Excel and inspect per-row send JSON logs in storage/campaigns/<campaignId>/.
