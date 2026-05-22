@@ -166,6 +166,89 @@ function compact(value) {
   return String(value || "").trim();
 }
 
+function normalizeEmailValue(value) {
+  return compact(value).toLowerCase();
+}
+
+function domainFromEmail(value) {
+  const email = normalizeEmailValue(value);
+  const atIndex = email.lastIndexOf("@");
+  if (atIndex < 1 || atIndex >= email.length - 1) {
+    return "";
+  }
+  return email.slice(atIndex + 1);
+}
+
+function normalizeUsageCountMap(value) {
+  const usage = {};
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return usage;
+  }
+  for (const [rawKey, rawCount] of Object.entries(value)) {
+    const key = normalizeEmailValue(rawKey);
+    if (!key) {
+      continue;
+    }
+    usage[key] = Math.max(0, Number.parseInt(rawCount, 10) || 0);
+  }
+  return usage;
+}
+
+function buildSenderUsageFromRows(rows = []) {
+  const usage = {};
+  for (const row of Array.isArray(rows) ? rows : []) {
+    const status = normalizeEmailValue(row?.emailStatus || row?.sourceRow?.[EMAIL_STATUS_COLUMN]);
+    if (status !== "sent") {
+      continue;
+    }
+    const senderEmail = normalizeEmailValue(row?.senderEmail || row?.sourceRow?.[EMAIL_SENDER_COLUMN]);
+    if (!senderEmail) {
+      continue;
+    }
+    usage[senderEmail] = (Number(usage[senderEmail]) || 0) + 1;
+  }
+  return usage;
+}
+
+function buildDomainUsageFromRows(rows = []) {
+  const usage = {};
+  for (const row of Array.isArray(rows) ? rows : []) {
+    const status = normalizeEmailValue(row?.emailStatus || row?.sourceRow?.[EMAIL_STATUS_COLUMN]);
+    if (status !== "sent") {
+      continue;
+    }
+    const senderDomain = normalizeEmailValue(
+      row?.senderDomain || row?.sourceRow?.[EMAIL_SENDER_DOMAIN_COLUMN] || domainFromEmail(row?.senderEmail || row?.sourceRow?.[EMAIL_SENDER_COLUMN])
+    );
+    if (!senderDomain) {
+      continue;
+    }
+    usage[senderDomain] = (Number(usage[senderDomain]) || 0) + 1;
+  }
+  return usage;
+}
+
+function mergeUsageCountMaps(primary = {}, fallback = {}) {
+  const merged = { ...normalizeUsageCountMap(primary) };
+  const fallbackUsage = normalizeUsageCountMap(fallback);
+  for (const [key, value] of Object.entries(fallbackUsage)) {
+    if (!Object.prototype.hasOwnProperty.call(merged, key)) {
+      merged[key] = value;
+      continue;
+    }
+    merged[key] = Math.max(merged[key], value);
+  }
+  return merged;
+}
+
+function buildMergedUsageFromMetadata(metadata = {}) {
+  const rows = Array.isArray(metadata?.rows) ? metadata.rows : [];
+  return {
+    domainUsage: mergeUsageCountMaps(metadata?.bulkDomainUsage, buildDomainUsageFromRows(rows)),
+    senderUsage: mergeUsageCountMaps(metadata?.bulkSenderUsage, buildSenderUsageFromRows(rows)),
+  };
+}
+
 function waitMs(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -889,12 +972,11 @@ class CampaignStorage {
       await waitMs(normalizedWaitMs);
       return;
     }
-    await Promise.race([
-      waitMs(normalizedWaitMs),
-      control.stopPromise.then(() => {
-        throw this.buildRunStopError(stage);
-      }),
-    ]);
+    const stopToken = Symbol("campaign-stop");
+    const raceResult = await Promise.race([waitMs(normalizedWaitMs), control.stopPromise.then(() => stopToken)]);
+    if (raceResult === stopToken) {
+      throw this.buildRunStopError(stage);
+    }
   }
 
   async runPipelineStage({ campaignId, stageName, rowNumber, execute }) {
@@ -904,11 +986,8 @@ class CampaignStorage {
     let timer;
     try {
       const control = this.getRunControl(campaignId);
-      const stopPromise = control
-        ? control.stopPromise.then(() => {
-            throw this.buildRunStopError(stageName);
-          })
-        : null;
+      const stopToken = Symbol("campaign-stop");
+      const stopPromise = control ? control.stopPromise.then(() => stopToken) : null;
       const raceEntries = [
         Promise.resolve().then(() => execute()),
         new Promise((_, reject) => {
@@ -920,7 +999,11 @@ class CampaignStorage {
       if (stopPromise) {
         raceEntries.push(stopPromise);
       }
-      return await Promise.race(raceEntries);
+      const raceResult = await Promise.race(raceEntries);
+      if (raceResult === stopToken) {
+        throw this.buildRunStopError(stageName);
+      }
+      return raceResult;
     } finally {
       if (timer) {
         clearTimeout(timer);
@@ -1250,6 +1333,9 @@ class CampaignStorage {
     }
 
     next.status = compact(next.status).toLowerCase() || (next.processedRows >= next.rows.length ? CAMPAIGN_STATUS_COMPLETED : CAMPAIGN_STATUS_RUNNING);
+    const usage = buildMergedUsageFromMetadata(next);
+    next.bulkDomainUsage = usage.domainUsage;
+    next.bulkSenderUsage = usage.senderUsage;
     next.results = next.rows.map((row) => this.toResultRow(row));
     return next;
   }
@@ -2461,36 +2547,50 @@ class CampaignStorage {
   }
 
   async runConcurrentCampaignFetchWorker(campaignId, targetRows, workerId) {
-    while (true) {
-      this.assertRunNotStopped(campaignId, `fetch-worker-${workerId}`);
-      const claim = await this.claimNextFetchRow(campaignId, targetRows);
-      if (!claim?.rowNumber) {
-        return;
-      }
-      await this.processSingleCampaignRowFetchConcurrent({
-        campaignId,
-        rowNumber: claim.rowNumber,
-        workerId,
-      });
-    }
-  }
-
-  async runConcurrentCampaignGenerationWorker(campaignId, targetRows, workerId, isFetchCompleted) {
-    while (true) {
-      this.assertRunNotStopped(campaignId, `generation-worker-${workerId}`);
-      const claim = await this.claimNextGenerationRow(campaignId, targetRows);
-      if (claim?.rowNumber) {
-        await this.processSingleCampaignRowGenerationConcurrent({
+    try {
+      while (true) {
+        this.assertRunNotStopped(campaignId, `fetch-worker-${workerId}`);
+        const claim = await this.claimNextFetchRow(campaignId, targetRows);
+        if (!claim?.rowNumber) {
+          return;
+        }
+        await this.processSingleCampaignRowFetchConcurrent({
           campaignId,
           rowNumber: claim.rowNumber,
           workerId,
         });
-        continue;
       }
-      if (isFetchCompleted()) {
+    } catch (error) {
+      if (this.isRunStopError(error)) {
         return;
       }
-      await this.waitWithRunStop(campaignId, 250, `generation-worker-${workerId}-wait`);
+      throw error;
+    }
+  }
+
+  async runConcurrentCampaignGenerationWorker(campaignId, targetRows, workerId, isFetchCompleted) {
+    try {
+      while (true) {
+        this.assertRunNotStopped(campaignId, `generation-worker-${workerId}`);
+        const claim = await this.claimNextGenerationRow(campaignId, targetRows);
+        if (claim?.rowNumber) {
+          await this.processSingleCampaignRowGenerationConcurrent({
+            campaignId,
+            rowNumber: claim.rowNumber,
+            workerId,
+          });
+          continue;
+        }
+        if (isFetchCompleted()) {
+          return;
+        }
+        await this.waitWithRunStop(campaignId, 250, `generation-worker-${workerId}-wait`);
+      }
+    } catch (error) {
+      if (this.isRunStopError(error)) {
+        return;
+      }
+      throw error;
     }
   }
 
@@ -3165,6 +3265,8 @@ class CampaignStorage {
       metadata.succeeded = 0;
       metadata.failed = queueRows.filter((item) => item.status === ROW_STATUS_FAILED).length;
       metadata.processedRows = metadata.failed;
+      metadata.bulkDomainUsage = {};
+      metadata.bulkSenderUsage = {};
       metadata.status = CAMPAIGN_STATUS_PAUSED;
       metadata.error = "";
       metadata.completedAt = "";
@@ -3298,6 +3400,7 @@ class CampaignStorage {
       if (status === CAMPAIGN_STATUS_RUNNING || this.activeRuns.has(normalizedCampaignId)) {
         throw new Error("Cannot delete rows while campaign is running. Pause or stop the campaign first.");
       }
+      const usageBeforeDelete = buildMergedUsageFromMetadata(metadata);
 
       const rowSet = new Set(normalizedRowNumbers);
       const rows = Array.isArray(metadata.rows) ? metadata.rows : [];
@@ -3347,6 +3450,8 @@ class CampaignStorage {
       metadata.rows = remainingRows;
       metadata.count = remainingRows.length;
       metadata.availableRows = remainingRows.length;
+      metadata.bulkDomainUsage = usageBeforeDelete.domainUsage;
+      metadata.bulkSenderUsage = usageBeforeDelete.senderUsage;
       metadata.pausedAtRow = null;
       metadata.resumeFromRow = this.findNextPendingRowNumber(remainingRows) || null;
       if (remainingRows.length < 1 || !metadata.resumeFromRow) {
@@ -3619,6 +3724,8 @@ class CampaignStorage {
       processedRows: 0,
       succeeded: 0,
       failed: queueRows.filter((item) => item.status === ROW_STATUS_FAILED).length,
+      bulkDomainUsage: {},
+      bulkSenderUsage: {},
       status: CAMPAIGN_STATUS_RUNNING,
       pausedAtRow: null,
       resumeFromRow: this.findNextPendingRowNumber(queueRows) || null,

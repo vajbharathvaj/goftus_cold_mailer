@@ -119,6 +119,89 @@ function getCampaignDomainUsage(metadata = {}) {
   return usage;
 }
 
+function getCampaignSenderUsage(metadata = {}) {
+  const usage = {};
+  const rows = Array.isArray(metadata?.rows) ? metadata.rows : [];
+  for (const row of rows) {
+    const emailStatus = normalizeEmail(row?.emailStatus || row?.sourceRow?.email_status);
+    if (emailStatus !== "sent") {
+      continue;
+    }
+    const senderEmail = normalizeEmail(row?.senderEmail || row?.sourceRow?.[EMAIL_SENDER_COLUMN]);
+    if (!senderEmail) {
+      continue;
+    }
+    usage[senderEmail] = (Number(usage[senderEmail]) || 0) + 1;
+  }
+  return usage;
+}
+
+function normalizeUsageMap(value) {
+  const usage = {};
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return usage;
+  }
+  for (const [rawKey, rawCount] of Object.entries(value)) {
+    const key = normalizeEmail(rawKey);
+    if (!key) {
+      continue;
+    }
+    usage[key] = Math.max(0, Number.parseInt(rawCount, 10) || 0);
+  }
+  return usage;
+}
+
+function mergeUsageMaps(primary = {}, fallback = {}) {
+  const merged = { ...normalizeUsageMap(primary) };
+  const fallbackUsage = normalizeUsageMap(fallback);
+  for (const [key, value] of Object.entries(fallbackUsage)) {
+    if (!Object.prototype.hasOwnProperty.call(merged, key)) {
+      merged[key] = value;
+      continue;
+    }
+    merged[key] = Math.max(merged[key], value);
+  }
+  return merged;
+}
+
+function getCampaignUsage(metadata = {}) {
+  const rowDomainUsage = getCampaignDomainUsage(metadata);
+  const rowSenderUsage = getCampaignSenderUsage(metadata);
+  const storedDomainUsage = normalizeUsageMap(metadata?.bulkDomainUsage);
+  const storedSenderUsage = normalizeUsageMap(metadata?.bulkSenderUsage);
+  return {
+    domainUsage: mergeUsageMaps(storedDomainUsage, rowDomainUsage),
+    senderUsage: mergeUsageMaps(storedSenderUsage, rowSenderUsage),
+  };
+}
+
+async function incrementCampaignUsageCounters(campaignId, { senderEmail = "", senderDomain = "" } = {}) {
+  const normalizedCampaignId = compact(campaignId);
+  if (!normalizedCampaignId) {
+    return { domainUsage: {}, senderUsage: {} };
+  }
+  const normalizedSenderEmail = normalizeEmail(senderEmail);
+  const normalizedSenderDomain = normalizeEmail(senderDomain || getDomainFromEmail(senderEmail));
+
+  return campaignStorage.withCampaignLock(normalizedCampaignId, async () => {
+    const metadata = await campaignStorage.getCampaignMetadata(normalizedCampaignId);
+    if (!metadata) {
+      return { domainUsage: {}, senderUsage: {} };
+    }
+    const usage = getCampaignUsage(metadata);
+    if (normalizedSenderDomain) {
+      usage.domainUsage[normalizedSenderDomain] = (Number(usage.domainUsage[normalizedSenderDomain]) || 0) + 1;
+    }
+    if (normalizedSenderEmail) {
+      usage.senderUsage[normalizedSenderEmail] = (Number(usage.senderUsage[normalizedSenderEmail]) || 0) + 1;
+    }
+    metadata.bulkDomainUsage = usage.domainUsage;
+    metadata.bulkSenderUsage = usage.senderUsage;
+    await campaignStorage.writeCampaignMetadata(normalizedCampaignId, metadata);
+    return usage;
+  });
+}
+
 function isWarmupEnabled() {
   const normalized = compact(process.env.WARMUP_ENABLED || "false").toLowerCase();
   return ["1", "true", "yes", "on"].includes(normalized);
@@ -511,7 +594,7 @@ app.get("/api/mail/senders", async (req, res) => {
     const defaultSenderName = compact(process.env.BREVO_FROM_NAME) || "Cold Mailbot";
     const campaignId = compact(req.query?.campaignId);
     const campaignMetadata = campaignId ? await campaignStorage.getCampaignMetadata(campaignId) : null;
-    const domainUsage = campaignMetadata ? getCampaignDomainUsage(campaignMetadata) : {};
+    const usage = campaignMetadata ? getCampaignUsage(campaignMetadata) : { domainUsage: {}, senderUsage: {} };
     return res.json({
       ok: true,
       defaultSender: {
@@ -519,7 +602,8 @@ app.get("/api/mail/senders", async (req, res) => {
         name: defaultSenderName,
       },
       bulkDomainLimit: 30,
-      domainUsage,
+      domainUsage: usage.domainUsage,
+      senderUsage: usage.senderUsage,
       senders,
     });
   } catch (error) {
@@ -914,7 +998,7 @@ app.post("/api/campaigns/send", async (req, res) => {
     const requestedSenderDomain = getDomainFromEmail(requestedSenderEmail);
     if (parsed.data.enforceDomainBulkLimit && requestedSenderDomain) {
       const campaignMetadata = await campaignStorage.getCampaignMetadata(parsed.data.campaignId);
-      const usageByDomain = getCampaignDomainUsage(campaignMetadata || {});
+      const usageByDomain = getCampaignUsage(campaignMetadata || {}).domainUsage;
       const used = Number(usageByDomain[requestedSenderDomain]) || 0;
       if (used >= domainLimit) {
         return res.status(409).json({
@@ -945,12 +1029,17 @@ app.post("/api/campaigns/send", async (req, res) => {
         [EMAIL_STATUS_COLUMN]: emailStatus,
       },
     });
+    const usage = await incrementCampaignUsageCounters(parsed.data.campaignId, {
+      senderEmail: sentSenderEmail,
+      senderDomain: sentSenderDomain,
+    });
     const campaignMetadata = await campaignStorage.getCampaignMetadata(parsed.data.campaignId);
     await maybeSendCampaignCompletionNotification(campaignMetadata || {});
     return res.json({
       ...sent,
       emailStatus,
-      domainUsage: getCampaignDomainUsage(campaignMetadata || {}),
+      domainUsage: usage.domainUsage,
+      senderUsage: usage.senderUsage,
     });
   } catch (error) {
     try {

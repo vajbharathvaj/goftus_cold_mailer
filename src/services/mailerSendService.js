@@ -15,6 +15,31 @@ function getDomainFromEmail(value) {
   return email.slice(index + 1);
 }
 
+function toSenderActiveFlag(sender = {}) {
+  if (typeof sender.active === "boolean") {
+    return sender.active;
+  }
+  if (sender.active !== undefined && sender.active !== null) {
+    const normalized = compact(sender.active).toLowerCase();
+    if (["false", "0", "no", "off", "inactive", "disabled"].includes(normalized)) {
+      return false;
+    }
+    if (["true", "1", "yes", "on", "active", "enabled"].includes(normalized)) {
+      return true;
+    }
+  }
+  const status = compact(sender.status).toLowerCase();
+  if (status) {
+    if (["inactive", "disabled", "blocked"].includes(status)) {
+      return false;
+    }
+    if (["active", "enabled"].includes(status)) {
+      return true;
+    }
+  }
+  return true;
+}
+
 function getMailerConfig() {
   return {
     brevoApiKey: compact(process.env.BREVO_API_KEY),
@@ -93,7 +118,7 @@ function normalizeSender(sender = {}) {
     name: compact(sender.name),
     email,
     domain,
-    active: sender.active !== false,
+    active: toSenderActiveFlag(sender),
     ips: Array.isArray(sender.ips) ? sender.ips : [],
   };
 }

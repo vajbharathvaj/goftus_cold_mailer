@@ -1328,6 +1328,199 @@ textarea {
   }
 }
 
+/* Cleaner UI pass: visual hierarchy, spacing rhythm, and control grouping */
+:root {
+  --bg-base: #0b0f14;
+  --bg-surface: #131a23;
+  --bg-elevated: #1a2230;
+  --bg-hover: #1f2a39;
+  --border-subtle: #2b3748;
+  --border-active: #30c8ff66;
+  --text-primary: #e7eef7;
+  --text-secondary: #9aa9bd;
+  --cyan: #30c8ff;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+  --shadow-lg: 0 10px 28px rgba(0, 0, 0, 0.32);
+}
+
+body {
+  background-image:
+    radial-gradient(circle at 12% -12%, rgba(48, 200, 255, 0.1), transparent 34%),
+    radial-gradient(circle at 90% 130%, rgba(255, 180, 80, 0.07), transparent 26%);
+  background-size: auto, auto;
+}
+
+.app-shell {
+  width: min(1720px, calc(100% - 28px));
+  margin: 14px auto;
+  min-height: calc(100vh - 28px);
+  gap: 16px;
+}
+
+.panel {
+  border-color: #263243;
+  box-shadow: var(--shadow-lg);
+}
+
+.sidebar,
+.topbar,
+.mailer-input-panel,
+.mailer-result-panel,
+.upload-zone-panel,
+.run-console,
+.run-summary,
+.history-panel {
+  border-color: #263243;
+}
+
+.topbar {
+  min-height: 76px;
+  padding: 14px 18px;
+}
+
+.topbar-title {
+  margin-top: 5px;
+  letter-spacing: 0.01em;
+}
+
+.btn {
+  min-height: 38px;
+  padding: 0 13px;
+}
+
+.btn-ghost {
+  background: #141d28;
+}
+
+.btn-danger {
+  background: #2c151b;
+}
+
+input,
+textarea,
+select,
+#sendAllCountInput,
+#senderSelect {
+  border-color: #314055;
+  background: #0f151d;
+  min-height: 36px;
+}
+
+.panel-head {
+  margin-bottom: 14px;
+}
+
+.result-block {
+  border-color: #2e3b4f;
+  margin-bottom: 12px;
+}
+
+.result-block summary {
+  min-height: 40px;
+  padding: 0 12px;
+}
+
+.output {
+  padding: 12px;
+  font-size: 0.83rem;
+}
+
+.upload-zone {
+  min-height: 156px;
+  border-color: #34597b;
+  background: linear-gradient(180deg, #131b27 0%, #0f151d 100%);
+}
+
+.upload-controls {
+  margin-top: 14px;
+  gap: 12px;
+}
+
+.run-header {
+  align-items: flex-start;
+  gap: 12px;
+  padding-bottom: 12px;
+}
+
+.run-header-actions {
+  width: 100%;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.campaign-send-all {
+  width: min(100%, 980px);
+  margin-left: auto;
+  gap: 6px;
+  border: 1px solid #2d3a4e;
+  border-radius: var(--radius-md);
+  background: #101722;
+  padding: 10px;
+}
+
+.campaign-send-controls {
+  gap: 8px;
+}
+
+#senderMeta,
+#sendAllMeta {
+  font-size: 0.73rem;
+  line-height: 1.25;
+}
+
+.queue-head {
+  margin-bottom: 8px;
+}
+
+.queue-row {
+  border-color: #2f3d52;
+}
+
+.queue-row-head {
+  min-height: 46px;
+  padding: 0 12px;
+}
+
+.queue-row-expand {
+  padding: 12px;
+}
+
+.history-item {
+  border-color: #304058;
+  background: #111823;
+}
+
+.status-line {
+  border-color: #2f3e53;
+  background: #111823;
+}
+
+.status-line:hover {
+  background: #152130;
+}
+
+.nav-item {
+  border-color: #304056;
+  background: #111823;
+}
+
+.nav-item:hover {
+  background: #162132;
+}
+
+.nav-item.active {
+  background: #172739;
+}
+
+button:focus-visible,
+input:focus-visible,
+textarea:focus-visible,
+select:focus-visible {
+  outline: 2px solid #30c8ff;
+  outline-offset: 1px;
+}
+
 @media (max-width: 1200px) {
   .mailer-grid {
     grid-template-columns: 1fr;
@@ -1349,6 +1542,11 @@ textarea {
     width: min(100%, calc(100% - 12px));
     margin: 6px auto;
     gap: 8px;
+  }
+
+  .campaign-send-all {
+    width: 100%;
+    margin-left: 0;
   }
 
   .topbar {
