@@ -23,6 +23,14 @@ const EMAIL_COLUMN_CANDIDATES = [
   "workemail",
   "businessemail",
   "primaryemail",
+  "contactprofessionsemail",
+  "contactprofessionalemail",
+  "directdecisionmakeremail",
+  "bestoutreachemail",
+  "decisionmakeremail",
+  "prospectemail",
+  "emailid",
+  "emails",
 ];
 const JINA_CONTENT_COLUMN = "jina_content";
 const JINA_ERROR_COLUMN = "jina_error";
@@ -305,7 +313,38 @@ function normalizeRecipientEmail(value) {
   if (!raw) {
     return "";
   }
-  return raw.toLowerCase();
+  const jsonCandidate = raw.startsWith("[") || raw.startsWith("{");
+  if (jsonCandidate) {
+    try {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) {
+        for (const item of parsed) {
+          const nested = normalizeRecipientEmail(item?.address || item?.email || item);
+          if (nested) {
+            return nested;
+          }
+        }
+      } else if (parsed && typeof parsed === "object") {
+        return normalizeRecipientEmail(parsed.address || parsed.email);
+      }
+    } catch (_error) {
+      // Fall through to token extraction.
+    }
+  }
+  const tokens = raw
+    .split(/[\s,;|]+/g)
+    .map((item) => String(item || "").replace(/[<>()"'`]+/g, "").trim())
+    .filter(Boolean);
+  const emailPattern = /^[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}$/i;
+  for (const token of tokens) {
+    if (emailPattern.test(token)) {
+      return token.toLowerCase();
+    }
+  }
+  if (emailPattern.test(raw)) {
+    return raw.toLowerCase();
+  }
+  return "";
 }
 
 function resolveRecipientEmailFromRow({ row = {}, sourceRow = {}, emailColumn = "" } = {}) {
@@ -323,7 +362,14 @@ function resolveRecipientEmailFromRow({ row = {}, sourceRow = {}, emailColumn = 
       sourceRow?.workEmail,
       sourceRow?.WorkEmail,
       sourceRow?.businessEmail,
-      sourceRow?.BusinessEmail
+      sourceRow?.BusinessEmail,
+      sourceRow?.contact_professions_email,
+      sourceRow?.contactProfessionalEmail,
+      sourceRow?.direct_decision_maker_email,
+      sourceRow?.best_outreach_email,
+      sourceRow?.["Direct Decision Maker Email"],
+      sourceRow?.["Best Outreach Email"],
+      sourceRow?.emails
     )
   );
 }
@@ -3453,7 +3499,13 @@ class CampaignStorage {
         continue;
       }
 
-      const normalizedContactEmail = emailColumn ? normalizeRecipientEmail(row[emailColumn]) : "";
+      const normalizedContactEmail = resolveRecipientEmailFromRow({
+        row: {
+          contactEmail: row[EMAIL_TO_COLUMN],
+        },
+        sourceRow: row,
+        emailColumn,
+      });
       const missingRecipientEmail = !normalizedContactEmail;
       if (missingRecipientEmail) {
         row[EMAIL_ERROR_COLUMN] = MISSING_RECIPIENT_EMAIL_ERROR;
