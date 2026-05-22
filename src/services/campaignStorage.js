@@ -1226,10 +1226,9 @@ class CampaignStorage {
     }
     const next = { ...metadata };
     const legacyResults = Array.isArray(metadata.results) ? metadata.results : [];
-    const rawRows =
-      Array.isArray(metadata.rows) && metadata.rows.length > 0
-        ? metadata.rows
-        : legacyResults.map((item, index) => ({
+    const rawRows = Array.isArray(metadata.rows)
+      ? metadata.rows
+      : legacyResults.map((item, index) => ({
             index,
             rowNumber: Number(item?.rowNumber) || index + 2,
             companyName: compact(item?.companyName),
@@ -1325,7 +1324,13 @@ class CampaignStorage {
     next.succeeded = succeeded;
     next.failed = failed;
     next.processedRows = succeeded + failed;
-    next.count = Number.isFinite(Number(next.count)) ? Number.parseInt(next.count, 10) : next.rows.length;
+    next.count = Number.isFinite(Number(next.count))
+      ? Math.max(0, Math.min(Number.parseInt(next.count, 10), next.rows.length))
+      : next.rows.length;
+    if (next.rows.length > 0 && next.count < 1) {
+      next.count = next.rows.length;
+    }
+    next.availableRows = next.rows.length;
 
     const resumeRow = this.findNextPendingRowNumber(next.rows);
     if (!compact(next.resumeFromRow) && resumeRow) {
@@ -3448,6 +3453,7 @@ class CampaignStorage {
       await fs.writeFile(enrichedPath, rebuiltBuffer);
 
       metadata.rows = remainingRows;
+      metadata.results = remainingRows.map((item) => this.toResultRow(item));
       metadata.count = remainingRows.length;
       metadata.availableRows = remainingRows.length;
       metadata.bulkDomainUsage = usageBeforeDelete.domainUsage;
