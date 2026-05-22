@@ -4,6 +4,7 @@ const assert = require("node:assert/strict");
 const {
   OPT_OUT_LINE,
   normalizeDraft,
+  normalizeDraftPreserveLines,
   normalizeSubject,
   parseStructuredEmailOutput,
   parseVariantsOutput,
@@ -14,6 +15,11 @@ const {
 test("normalizeDraft strips wrapping punctuation and markdown links", () => {
   const value = ' "Hello [team](https://example.com)  " ';
   assert.equal(normalizeDraft(value), "Hello team");
+});
+
+test("normalizeDraftPreserveLines keeps paragraph breaks", () => {
+  const value = ' "Hi [team](https://example.com)\n\n  next line  " ';
+  assert.equal(normalizeDraftPreserveLines(value), "Hi team\n\nnext line");
 });
 
 test("normalizeSubject strips subject prefixes and punctuation", () => {

@@ -2,6 +2,25 @@ const { TextDecoder } = require("util");
 
 let generationCounter = 0;
 
+function isFetchConnectionFailure(error) {
+  return error && error.name === "TypeError" && /fetch failed/i.test(String(error.message || ""));
+}
+
+function buildOllamaConnectionError({ baseUrl, action, error }) {
+  const causeMessage = String(error?.cause?.message || "").trim();
+  const suffix = causeMessage ? ` (${causeMessage})` : "";
+  const wrapped = new Error(
+    `Cannot reach Ollama at ${baseUrl} while ${action}. Start Ollama with "ollama serve" and ensure the model is available.${suffix}`
+  );
+  wrapped.cause = error;
+  return wrapped;
+}
+
+function normalizeAbortReason(reason, fallback = "Request aborted") {
+  const message = String(reason?.message || reason || "").trim();
+  return message || fallback;
+}
+
 class OllamaClient {
   constructor({ baseUrl, model, timeoutMs, generationOptions = {}, think, keepAlive }) {
     this.baseUrl = baseUrl;
@@ -16,6 +35,12 @@ class OllamaClient {
     try {
       return await this.generateWithThink({ system, prompt, options, think: this.think });
     } catch (error) {
+      if (error.name === "AbortError") {
+        const abortMessage = normalizeAbortReason(error.message, "Request aborted");
+        if (/campaign stop requested/i.test(abortMessage)) {
+          throw new Error(abortMessage);
+        }
+      }
       const shouldRetryWithoutThink =
         Boolean(this.think) &&
         (error.name === "AbortError" || /think value .* is not supported/i.test(error.message || ""));
@@ -41,27 +66,46 @@ class OllamaClient {
   }
 
   async generateWithThink({ system, prompt, options = {}, think }) {
+    const { abortSignal = null, ...generationOverrides } = options || {};
+    if (abortSignal?.aborted) {
+      const aborted = new Error(normalizeAbortReason(abortSignal.reason, "Campaign stop requested"));
+      aborted.name = "AbortError";
+      throw aborted;
+    }
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), this.timeoutMs);
+    const timer = setTimeout(() => controller.abort(new Error(`Ollama request timed out after ${this.timeoutMs}ms`)), this.timeoutMs);
+    let abortHandler = null;
+    if (abortSignal) {
+      abortHandler = () => controller.abort(abortSignal.reason || new Error("Campaign stop requested"));
+      abortSignal.addEventListener("abort", abortHandler, { once: true });
+    }
     const decoder = new TextDecoder();
-    const mergedOptions = { ...this.generationOptions, ...options };
+    const mergedOptions = { ...this.generationOptions, ...generationOverrides };
     const generationId = `gen-${++generationCounter}`;
 
     try {
-      const response = await fetch(`${this.baseUrl}/api/generate`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        signal: controller.signal,
-        body: JSON.stringify({
-          model: this.model,
-          stream: true,
-          system,
-          prompt,
-          ...(think ? { think } : {}),
-          ...(this.keepAlive ? { keep_alive: this.keepAlive } : {}),
-          options: mergedOptions,
-        }),
-      });
+      let response;
+      try {
+        response = await fetch(`${this.baseUrl}/api/generate`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          signal: controller.signal,
+          body: JSON.stringify({
+            model: this.model,
+            stream: true,
+            system,
+            prompt,
+            ...(think ? { think } : {}),
+            ...(this.keepAlive ? { keep_alive: this.keepAlive } : {}),
+            options: mergedOptions,
+          }),
+        });
+      } catch (error) {
+        if (isFetchConnectionFailure(error)) {
+          throw buildOllamaConnectionError({ baseUrl: this.baseUrl, action: "generating content", error });
+        }
+        throw error;
+      }
 
       if (!response.ok) {
         const body = await response.text();
@@ -123,6 +167,9 @@ class OllamaClient {
       return visibleText.trim();
     } finally {
       clearTimeout(timer);
+      if (abortSignal && abortHandler) {
+        abortSignal.removeEventListener("abort", abortHandler);
+      }
     }
   }
 
@@ -155,6 +202,9 @@ class OllamaClient {
       if (error.name === "AbortError") {
         throw new Error(`Warmup timed out after ${this.timeoutMs}ms`);
       }
+      if (isFetchConnectionFailure(error)) {
+        throw buildOllamaConnectionError({ baseUrl: this.baseUrl, action: "warming up model", error });
+      }
       throw error;
     } finally {
       clearTimeout(timer);
@@ -185,6 +235,9 @@ class OllamaClient {
     } catch (error) {
       if (error.name === "AbortError") {
         throw new Error(`Unload timed out after ${this.timeoutMs}ms`);
+      }
+      if (isFetchConnectionFailure(error)) {
+        throw buildOllamaConnectionError({ baseUrl: this.baseUrl, action: "unloading model", error });
       }
       throw error;
     } finally {

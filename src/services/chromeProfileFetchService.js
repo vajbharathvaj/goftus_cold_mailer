@@ -15,6 +15,11 @@ function compact(value) {
   return String(value || "").trim();
 }
 
+function normalizeAbortReason(reason, fallback = "Campaign stop requested") {
+  const message = compact(reason?.message || reason);
+  return message || fallback;
+}
+
 function randomInt(min, max) {
   const lo = Math.min(min, max);
   const hi = Math.max(min, max);
@@ -1322,6 +1327,16 @@ async function fetchViaRealChromeProfile(url, options = {}) {
     throw new Error("Chrome profile layer disabled");
   }
 
+  const abortSignal = options.abortSignal || null;
+  const assertNotAborted = () => {
+    if (abortSignal?.aborted) {
+      const error = new Error(normalizeAbortReason(abortSignal.reason));
+      error.name = "AbortError";
+      throw error;
+    }
+  };
+  assertNotAborted();
+
   const targetUrl = normalizeAbsoluteUrl(url);
   if (!targetUrl) {
     throw new Error("Invalid URL for chrome profile layer");
@@ -1411,6 +1426,7 @@ async function fetchViaRealChromeProfile(url, options = {}) {
   }
 
   let context;
+  let abortHandler = null;
   try {
     context = await chromium.launchPersistentContext(launchUserDataDir, {
       executablePath,
@@ -1428,6 +1444,13 @@ async function fetchViaRealChromeProfile(url, options = {}) {
       viewport: { width: profileWindowWidth, height: profileWindowHeight },
       timeout: timeoutMs,
     });
+    if (abortSignal) {
+      abortHandler = () => {
+        context.close().catch(() => {});
+      };
+      abortSignal.addEventListener("abort", abortHandler, { once: true });
+      assertNotAborted();
+    }
   } catch (error) {
     const message = String(error?.message || "");
     if (/DevTools remote debugging requires a non-default data directory/i.test(message)) {
@@ -1446,6 +1469,7 @@ async function fetchViaRealChromeProfile(url, options = {}) {
   let page = await context.newPage();
   context.on("response", trackTargetDocumentStatus);
   try {
+    assertNotAborted();
     log(`new page created initialUrl=${compact(page.url()) || "about:blank"}`);
     if (profileSearchOnly) {
       const searchUrl = `https://www.google.com/search?q=${encodeURIComponent(targetUrl)}`;
@@ -1469,6 +1493,7 @@ async function fetchViaRealChromeProfile(url, options = {}) {
       const effectiveProfileSearchWaitMs = Math.max(10000, profileSearchWaitMs);
       log(`profile-search-only mode waiting waitMs=${effectiveProfileSearchWaitMs}`);
       await resultPage.waitForTimeout(effectiveProfileSearchWaitMs);
+      assertNotAborted();
       const homepageSnapshot = await buildPageTextSnapshot(resultPage);
       log(
         `profile-search-only homepage snapshot captured url=${homepageSnapshot.url} textLen=${homepageSnapshot.text.length}`
@@ -1685,6 +1710,7 @@ async function fetchViaRealChromeProfile(url, options = {}) {
     log(`blank tab cleanup closed=${closedBlankTabs} remainingTabs=${context.pages().length}`);
     await page.waitForLoadState("networkidle", { timeout: Math.min(timeoutMs, 12000) }).catch(() => {});
     await page.waitForTimeout(1200);
+    assertNotAborted();
     log("post-navigation wait complete (networkidle + settle delay)");
 
     await closeNonCookiePopups(page, log, "target page(before cookies)");
@@ -1760,6 +1786,9 @@ async function fetchViaRealChromeProfile(url, options = {}) {
       source: "chrome_profile",
     };
   } finally {
+    if (abortSignal && abortHandler) {
+      abortSignal.removeEventListener("abort", abortHandler);
+    }
     if (debugHoldMs > 0) {
       log(`debug hold started holdMs=${debugHoldMs}`);
       await page.waitForTimeout(debugHoldMs).catch(() => {});

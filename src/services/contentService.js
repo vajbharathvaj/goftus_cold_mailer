@@ -10,6 +10,7 @@ const {
   validateDraft,
   validateSubject,
   normalizeDraft,
+  normalizeDraftPreserveLines,
   normalizeSubject,
   parseStructuredEmailOutput,
   parseVariantsOutput,
@@ -22,10 +23,11 @@ class ContentService {
     this.ollamaClient = ollamaClient;
   }
 
-  async generateDraft(lead) {
+  async generateDraft(lead, { abortSignal } = {}) {
     const raw = await this.ollamaClient.generate({
       system: buildSystemPrompt(),
       prompt: buildDraftPrompt(lead),
+      options: { abortSignal },
     });
 
     return {
@@ -35,7 +37,7 @@ class ContentService {
     };
   }
 
-  async generateDraftFromTemplate({ lead, recipientName = "", template = "" } = {}) {
+  async generateDraftFromTemplate({ lead, recipientName = "", template = "", abortSignal } = {}) {
     const raw = await this.ollamaClient.generate({
       system: buildSystemPrompt(),
       prompt: buildTemplateDraftPrompt({
@@ -43,19 +45,21 @@ class ContentService {
         recipientName,
         template,
       }),
+      options: { abortSignal },
     });
 
     return {
-      draft: normalizeDraft(raw),
+      draft: normalizeDraftPreserveLines(raw),
       compliance: validateDraft(raw),
       attempts: 1,
     };
   }
 
-  async generateSubject(lead, draftBody = "") {
+  async generateSubject(lead, draftBody = "", { abortSignal } = {}) {
     const raw = await this.ollamaClient.generate({
       system: buildSystemPrompt(),
       prompt: buildSubjectPrompt(lead, draftBody),
+      options: { abortSignal },
     });
 
     return {
@@ -65,10 +69,11 @@ class ContentService {
     };
   }
 
-  async generateContent(lead) {
+  async generateContent(lead, { abortSignal } = {}) {
     const raw = await this.ollamaClient.generate({
       system: buildSystemPrompt(),
       prompt: buildCombinedPrompt(lead),
+      options: { abortSignal },
     });
     const parsed = parseStructuredEmailOutput(raw);
 
@@ -109,10 +114,11 @@ class ContentService {
     };
   }
 
-  async generateVariants(lead) {
+  async generateVariants(lead, { abortSignal } = {}) {
     const raw = await this.ollamaClient.generate({
       system: buildSystemPrompt(),
       prompt: buildVariantsPrompt(lead),
+      options: { abortSignal },
     });
     const parsed = parseVariantsOutput(raw);
 

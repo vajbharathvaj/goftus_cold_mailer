@@ -3,7 +3,14 @@ const path = require("path");
 const { normalizeRecipientEmail } = require("./campaignStorage");
 const { MAILER_FIELD_ORDER } = require("./mailerDocService");
 const { sendEmail } = require("./mailerSendService");
-const { normalizeDraft, normalizeSubject, validateDraft, validateSubject, OPT_OUT_LINE } = require("../utils/contentRules");
+const {
+  normalizeDraft,
+  normalizeDraftPreserveLines,
+  normalizeSubject,
+  validateDraft,
+  validateSubject,
+  OPT_OUT_LINE,
+} = require("../utils/contentRules");
 
 const STORAGE_ROOT = path.resolve(__dirname, "../../storage/campaigns");
 const DEFAULT_EMAIL_TEMPLATE_PATH = path.resolve(__dirname, "../../email_template.md");
@@ -277,7 +284,7 @@ function fillTemplateFallback(template, { recipientName = "", mailerFields = {} 
     return firstNonEmpty(hardProblem, process, company);
   });
 
-  return normalizeDraft(filled);
+  return normalizeDraftPreserveLines(filled);
 }
 
 function isUsableDraft(draftResult) {
@@ -358,7 +365,16 @@ class CampaignSendService {
     return this.emailTemplatePromise;
   }
 
-  async buildPreviewForRow({ campaignId, rowNumber, websiteUrl, jinaContent, sourceRow, contactEmail, draftIterations = 1 }) {
+  async buildPreviewForRow({
+    campaignId,
+    rowNumber,
+    websiteUrl,
+    jinaContent,
+    sourceRow,
+    contactEmail,
+    draftIterations = 1,
+    abortSignal,
+  }) {
     const recipientEmail = resolveRecipientEmail(contactEmail, sourceRow);
 
     const reusableMailerFields = resolveMailerFieldsFromSourceRow(sourceRow, websiteUrl);
@@ -369,6 +385,7 @@ class CampaignSendService {
           websiteUrl,
           jinaContent,
           sourceRow,
+          abortSignal,
         });
     const recipientName = resolveRecipientName(sourceRow, recipientEmail);
     let draftResult = null;
@@ -382,6 +399,7 @@ class CampaignSendService {
           lead: mailerFields,
           recipientName,
           template,
+          abortSignal,
         });
         templateDraftAccepted = isUsableTemplateDraft(draftResult);
       } catch (_error) {
@@ -411,7 +429,7 @@ class CampaignSendService {
       typeof this.contentService.generateContent === "function"
     ) {
       try {
-        const combinedResult = await this.contentService.generateContent(mailerFields);
+        const combinedResult = await this.contentService.generateContent(mailerFields, { abortSignal });
         const combinedBody = normalizeDraft(combinedResult?.body);
         const combinedSubject = normalizeSubject(combinedResult?.subject);
 
@@ -436,11 +454,11 @@ class CampaignSendService {
 
     if (!templateDraftAccepted && !isUsableDraft(draftResult)) {
       for (let attempt = 0; attempt < draftIterations; attempt += 1) {
-        draftResult = await this.contentService.generateDraft(mailerFields);
+        draftResult = await this.contentService.generateDraft(mailerFields, { abortSignal });
       }
       if (!isUsableDraft(draftResult)) {
         try {
-          draftResult = await this.contentService.generateDraft(mailerFields);
+          draftResult = await this.contentService.generateDraft(mailerFields, { abortSignal });
         } catch (_error) {
           // Ignore retry failure and fall back below.
         }
@@ -456,7 +474,7 @@ class CampaignSendService {
     }
 
     if (!isUsableSubject(finalSubjectResult)) {
-      const subjectResult = await this.contentService.generateSubject(mailerFields, draftResult.draft);
+      const subjectResult = await this.contentService.generateSubject(mailerFields, draftResult.draft, { abortSignal });
       finalSubjectResult = subjectResult;
       if (!isUsableSubject(finalSubjectResult)) {
         const fallbackSubject = buildFallbackSubject(mailerFields);
@@ -488,7 +506,7 @@ class CampaignSendService {
     };
   }
 
-  async sendPreparedEmail({ campaignId, rowNumber, to, subject, body, mailerFields = null }) {
+  async sendPreparedEmail({ campaignId, rowNumber, to, subject, body, senderEmail = "", senderName = "", mailerFields = null }) {
     const recipientEmail = normalizeRecipientEmail(to);
     if (!recipientEmail) {
       throw new Error("Recipient email is required");
@@ -504,6 +522,8 @@ class CampaignSendService {
       to: recipientEmail,
       subject: finalSubject,
       text: finalBody,
+      senderEmail,
+      senderName,
     });
 
     const sentAt = new Date().toISOString();
@@ -518,6 +538,7 @@ class CampaignSendService {
       rejected: info.rejected || [],
       sentAt,
       mailerFields,
+      sender: info.sender || null,
     });
 
     return {
@@ -530,6 +551,7 @@ class CampaignSendService {
       messageId: info.messageId,
       accepted: info.accepted || [],
       rejected: info.rejected || [],
+      sender: info.sender || null,
       sentAt,
     };
   }

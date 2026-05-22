@@ -41,6 +41,8 @@ const EMAIL_PREVIEWED_AT_COLUMN = "email_previewed_at";
 const EMAIL_SENT_AT_COLUMN = "email_sent_at";
 const EMAIL_MESSAGE_ID_COLUMN = "email_message_id";
 const EMAIL_ERROR_COLUMN = "email_error";
+const EMAIL_SENDER_COLUMN = "email_sender";
+const EMAIL_SENDER_DOMAIN_COLUMN = "email_sender_domain";
 const EMAIL_STATUS_MISSING_RECIPIENT = "missing_email";
 const MISSING_RECIPIENT_EMAIL_ERROR = "Missing recipient email. Row skipped from processing.";
 const CAMPAIGN_STATUS_RUNNING = "running";
@@ -146,6 +148,8 @@ function buildResetColumnUpdates() {
     [EMAIL_SENT_AT_COLUMN]: "",
     [EMAIL_MESSAGE_ID_COLUMN]: "",
     [EMAIL_ERROR_COLUMN]: "",
+    [EMAIL_SENDER_COLUMN]: "",
+    [EMAIL_SENDER_DOMAIN_COLUMN]: "",
     [EMAIL_STATUS_COLUMN]: "pending",
   };
 }
@@ -701,6 +705,7 @@ class CampaignStorage {
     this.chromeBrowserPromise = null;
     this.chromePagePromise = null;
     this.activeRuns = new Map();
+    this.runControls = new Map();
     this.campaignLockChains = new Map();
     this.campaignEventNotifier = null;
     this.pipelineHandlers = {
@@ -712,20 +717,164 @@ class CampaignStorage {
     };
   }
 
-  async runPipelineStage({ stageName, rowNumber, execute }) {
+  ensureRunControl(campaignId) {
+    const normalizedCampaignId = compact(campaignId);
+    if (!normalizedCampaignId) {
+      return null;
+    }
+    if (this.runControls.has(normalizedCampaignId)) {
+      return this.runControls.get(normalizedCampaignId);
+    }
+    let stopResolve;
+    const control = {
+      campaignId: normalizedCampaignId,
+      stopRequested: false,
+      stopReason: "",
+      abortControllers: new Set(),
+      stopPromise: new Promise((resolve) => {
+        stopResolve = resolve;
+      }),
+      resolveStop: (reason = "Campaign stop requested") => {
+        if (control.stopRequested) {
+          return;
+        }
+        control.stopRequested = true;
+        control.stopReason = reason;
+        for (const controller of control.abortControllers) {
+          try {
+            controller.abort(reason);
+          } catch (_error) {
+            // Ignore individual controller abort errors.
+          }
+        }
+        control.abortControllers.clear();
+        stopResolve(reason);
+      },
+    };
+    this.runControls.set(normalizedCampaignId, control);
+    return control;
+  }
+
+  getRunControl(campaignId) {
+    const normalizedCampaignId = compact(campaignId);
+    if (!normalizedCampaignId) {
+      return null;
+    }
+    return this.runControls.get(normalizedCampaignId) || null;
+  }
+
+  clearRunControl(campaignId) {
+    const normalizedCampaignId = compact(campaignId);
+    if (!normalizedCampaignId) {
+      return;
+    }
+    this.runControls.delete(normalizedCampaignId);
+  }
+
+  isRunStopRequested(campaignId) {
+    const control = this.getRunControl(campaignId);
+    return Boolean(control?.stopRequested);
+  }
+
+  requestRunStop(campaignId, reason = "Campaign stop requested") {
+    const control = this.getRunControl(campaignId);
+    if (!control) {
+      return false;
+    }
+    control.resolveStop(String(reason || "Campaign stop requested"));
+    return true;
+  }
+
+  registerRunAbortController(campaignId) {
+    const control = this.ensureRunControl(campaignId);
+    if (!control) {
+      return null;
+    }
+    const controller = new AbortController();
+    control.abortControllers.add(controller);
+    if (control.stopRequested) {
+      controller.abort(control.stopReason || "Campaign stop requested");
+    }
+    return controller;
+  }
+
+  releaseRunAbortController(campaignId, controller) {
+    if (!controller) {
+      return;
+    }
+    const control = this.getRunControl(campaignId);
+    if (!control) {
+      return;
+    }
+    control.abortControllers.delete(controller);
+  }
+
+  async withRunAbortSignal(campaignId, execute) {
+    const controller = this.registerRunAbortController(campaignId);
+    try {
+      return await Promise.resolve(execute(controller?.signal));
+    } finally {
+      this.releaseRunAbortController(campaignId, controller);
+    }
+  }
+
+  buildRunStopError(stage = "processing") {
+    return new Error(`Campaign stop requested during ${stage}`);
+  }
+
+  isRunStopError(error) {
+    const message = compact(error?.message).toLowerCase();
+    return message.includes("campaign stop requested");
+  }
+
+  assertRunNotStopped(campaignId, stage = "processing") {
+    if (this.isRunStopRequested(campaignId)) {
+      throw this.buildRunStopError(stage);
+    }
+  }
+
+  async waitWithRunStop(campaignId, waitMsValue, stage = "wait") {
+    const normalizedWaitMs = Math.max(0, Number(waitMsValue) || 0);
+    if (normalizedWaitMs < 1) {
+      return;
+    }
+    const control = this.getRunControl(campaignId);
+    if (!control) {
+      await waitMs(normalizedWaitMs);
+      return;
+    }
+    await Promise.race([
+      waitMs(normalizedWaitMs),
+      control.stopPromise.then(() => {
+        throw this.buildRunStopError(stage);
+      }),
+    ]);
+  }
+
+  async runPipelineStage({ campaignId, stageName, rowNumber, execute }) {
     const timeoutMs = this.pipelineStageTimeoutMs;
     const startedAt = Date.now();
     console.log(`[campaign-stage] row=${rowNumber} ${stageName} started timeoutMs=${timeoutMs}`);
     let timer;
     try {
-      return await Promise.race([
+      const control = this.getRunControl(campaignId);
+      const stopPromise = control
+        ? control.stopPromise.then(() => {
+            throw this.buildRunStopError(stageName);
+          })
+        : null;
+      const raceEntries = [
         Promise.resolve().then(() => execute()),
         new Promise((_, reject) => {
           timer = setTimeout(() => {
             reject(new Error(`${stageName} timed out after ${timeoutMs}ms`));
           }, timeoutMs);
         }),
-      ]);
+      ];
+      if (stopPromise) {
+        raceEntries.push(stopPromise);
+      }
+      return await Promise.race(raceEntries);
     } finally {
       if (timer) {
         clearTimeout(timer);
@@ -973,6 +1122,8 @@ class CampaignStorage {
             emailSubject: compact(item?.emailSubject || item?.sourceRow?.[EMAIL_SUBJECT_COLUMN]),
             emailGeneratedBody: compact(item?.emailGeneratedBody || item?.sourceRow?.[EMAIL_GENERATED_BODY_COLUMN]),
             emailBody: compact(item?.emailBody || item?.sourceRow?.[EMAIL_BODY_COLUMN]),
+            senderEmail: compact(item?.senderEmail || item?.sourceRow?.[EMAIL_SENDER_COLUMN]),
+            senderDomain: compact(item?.senderDomain || item?.sourceRow?.[EMAIL_SENDER_DOMAIN_COLUMN]),
             mailerFields: item?.mailerFields && typeof item.mailerFields === "object" ? item.mailerFields : {},
             sourceRow: item && typeof item.sourceRow === "object" && !Array.isArray(item.sourceRow) ? item.sourceRow : {},
             emailStatus: compact(item?.emailStatus) || "pending",
@@ -1030,6 +1181,8 @@ class CampaignStorage {
         emailSubject: compact(item?.emailSubject || sourceRow[EMAIL_SUBJECT_COLUMN]),
         emailGeneratedBody: compact(item?.emailGeneratedBody || sourceRow[EMAIL_GENERATED_BODY_COLUMN]),
         emailBody: compact(item?.emailBody || sourceRow[EMAIL_BODY_COLUMN]),
+        senderEmail: compact(item?.senderEmail || sourceRow[EMAIL_SENDER_COLUMN]),
+        senderDomain: compact(item?.senderDomain || sourceRow[EMAIL_SENDER_DOMAIN_COLUMN]),
         mailerFields: item?.mailerFields && typeof item.mailerFields === "object" ? item.mailerFields : {},
         docFileName: compact(item?.docFileName),
         sourceRow,
@@ -1084,6 +1237,8 @@ class CampaignStorage {
       emailSubject: compact(row?.emailSubject || sourceRow[EMAIL_SUBJECT_COLUMN]),
       emailGeneratedBody: compact(row?.emailGeneratedBody || sourceRow[EMAIL_GENERATED_BODY_COLUMN]),
       emailBody: compact(row?.emailBody || sourceRow[EMAIL_BODY_COLUMN]),
+      senderEmail: compact(row?.senderEmail || sourceRow[EMAIL_SENDER_COLUMN]),
+      senderDomain: compact(row?.senderDomain || sourceRow[EMAIL_SENDER_DOMAIN_COLUMN]),
       mailerFields: row?.mailerFields && typeof row.mailerFields === "object" ? row.mailerFields : {},
       docFileName: compact(row?.docFileName),
       sourceRow,
@@ -1114,6 +1269,8 @@ class CampaignStorage {
       [EMAIL_SENT_AT_COLUMN]: firstNonEmpty(sourceRow[EMAIL_SENT_AT_COLUMN]),
       [EMAIL_MESSAGE_ID_COLUMN]: firstNonEmpty(sourceRow[EMAIL_MESSAGE_ID_COLUMN]),
       [EMAIL_ERROR_COLUMN]: firstNonEmpty(sourceRow[EMAIL_ERROR_COLUMN]),
+      [EMAIL_SENDER_COLUMN]: firstNonEmpty(row?.senderEmail, sourceRow[EMAIL_SENDER_COLUMN]),
+      [EMAIL_SENDER_DOMAIN_COLUMN]: firstNonEmpty(row?.senderDomain, sourceRow[EMAIL_SENDER_DOMAIN_COLUMN]),
       [EMAIL_STATUS_COLUMN]: firstNonEmpty(row?.emailStatus, sourceRow[EMAIL_STATUS_COLUMN]) || "pending",
     };
   }
@@ -1588,6 +1745,7 @@ class CampaignStorage {
 
     const onRunStart = this.pipelineHandlers.onRunStart;
     const onRunComplete = this.pipelineHandlers.onRunComplete;
+    this.ensureRunControl(normalizedCampaignId);
     const runPromise = (async () => {
       if (onRunStart) {
         try {
@@ -1599,6 +1757,9 @@ class CampaignStorage {
       return this.processCampaignRows(normalizedCampaignId);
     })()
       .catch(async (error) => {
+        if (this.isRunStopError(error)) {
+          return;
+        }
         try {
           await this.withCampaignLock(normalizedCampaignId, async () => {
             const metadata = await this.getCampaignMetadata(normalizedCampaignId);
@@ -1615,6 +1776,7 @@ class CampaignStorage {
       })
       .finally(async () => {
         this.activeRuns.delete(normalizedCampaignId);
+        this.clearRunControl(normalizedCampaignId);
         if (onRunComplete) {
           try {
             const metadata = await this.getCampaignMetadata(normalizedCampaignId);
@@ -1666,6 +1828,7 @@ class CampaignStorage {
     }
 
     for (let index = 0; index < targetRows; index += 1) {
+      this.assertRunNotStopped(campaignId, "row-loop");
       metadata = await this.getCampaignMetadata(campaignId);
       if (!metadata) {
         break;
@@ -1693,6 +1856,7 @@ class CampaignStorage {
       const rowStartedAt = Date.now();
       let failureStage = "websiteFetch";
       try {
+        this.assertRunNotStopped(campaignId, "websiteFetch");
         // Align default campaign fetch with refetch behavior: Google search -> result open -> hard refresh flow.
         const profileSearchOnly = this.profileSearchOnly;
         const websiteUrl = normalizeWebsiteUrl(firstNonEmpty(row.websiteUrl, row.sourceRow?.[metadata.websiteColumn]));
@@ -1720,32 +1884,40 @@ class CampaignStorage {
             rowIndex: eventRowNumber,
           });
         };
-        const websiteResult = await enrichWebsiteContent(websiteUrl, {
-          fetchImpl: this.fetchWithProxy.bind(this),
-          requestTimeoutMs: this.requestTimeoutMs,
-          playwrightEnabled: this.playwrightEnabled,
-          playwrightTimeoutMs: this.playwrightTimeoutMs,
-          chromeProfileEnabled: this.chromeProfileEnabled,
-          chromeExecutablePath: this.chromeExecutablePath,
-          chromeAutomationUserDataDir: this.chromeAutomationUserDataDir,
-          chromeForceMirrorProfile: this.chromeForceMirrorProfile,
-          chromeHeadless: this.chromeHeadless,
-          chromeHeadlessFallback: this.chromeHeadlessFallback,
-          subpageFetchEnabled: this.subpageFetchEnabled,
-          subPageMaxCount: this.subPageMaxCount,
-          chromeCookiesEnabled: this.chromeCookiesEnabled,
-          chromeUserDataDir: this.chromeUserDataDir,
-          chromeProfileName: this.chromeProfileDirectory,
-          chromeTimeoutMs: this.chromeTimeoutMs,
-          searchSnippetEnabled: this.searchSnippetEnabled,
-          searchSnippetMaxLines: this.searchSnippetMaxLines,
-          companyName: companyNameForFetch,
-          profileSearchOnly,
-          campaignId,
-          rowNumber: row.rowNumber,
-          rowIndex: row.rowNumber,
-          notifyUI,
-        });
+        const fetchAbortController = this.registerRunAbortController(campaignId);
+        const websiteResult = await (async () => {
+          try {
+            return await enrichWebsiteContent(websiteUrl, {
+              fetchImpl: this.fetchWithProxy.bind(this),
+              requestTimeoutMs: this.requestTimeoutMs,
+              playwrightEnabled: this.playwrightEnabled,
+              playwrightTimeoutMs: this.playwrightTimeoutMs,
+              chromeProfileEnabled: this.chromeProfileEnabled,
+              chromeExecutablePath: this.chromeExecutablePath,
+              chromeAutomationUserDataDir: this.chromeAutomationUserDataDir,
+              chromeForceMirrorProfile: this.chromeForceMirrorProfile,
+              chromeHeadless: this.chromeHeadless,
+              chromeHeadlessFallback: this.chromeHeadlessFallback,
+              subpageFetchEnabled: this.subpageFetchEnabled,
+              subPageMaxCount: this.subPageMaxCount,
+              chromeCookiesEnabled: this.chromeCookiesEnabled,
+              chromeUserDataDir: this.chromeUserDataDir,
+              chromeProfileName: this.chromeProfileDirectory,
+              chromeTimeoutMs: this.chromeTimeoutMs,
+              searchSnippetEnabled: this.searchSnippetEnabled,
+              searchSnippetMaxLines: this.searchSnippetMaxLines,
+              companyName: companyNameForFetch,
+              profileSearchOnly,
+              campaignId,
+              rowNumber: row.rowNumber,
+              rowIndex: row.rowNumber,
+              notifyUI,
+              abortSignal: fetchAbortController?.signal,
+            });
+          } finally {
+            this.releaseRunAbortController(campaignId, fetchAbortController);
+          }
+        })();
         if (Array.isArray(websiteResult.fetchTrace) && websiteResult.fetchTrace.length > 0) {
           console.log(`[campaign-row-trace] row=${row.rowNumber} ${websiteResult.fetchTrace.join(" | ")}`);
         }
@@ -1927,16 +2099,20 @@ class CampaignStorage {
           }
 
           const mailerResult = await this.runPipelineStage({
+            campaignId,
             stageName: "buildMailerDoc",
             rowNumber: row.rowNumber,
             execute: () =>
-              this.pipelineHandlers.buildMailerDoc({
-                campaignId,
-                rowNumber: row.rowNumber,
-                websiteUrl,
-                jinaContent,
-                sourceRow: mailPrepRow?.sourceRow || row.sourceRow || {},
-              }),
+              this.withRunAbortSignal(campaignId, (abortSignal) =>
+                this.pipelineHandlers.buildMailerDoc({
+                  campaignId,
+                  rowNumber: row.rowNumber,
+                  websiteUrl,
+                  jinaContent,
+                  sourceRow: mailPrepRow?.sourceRow || row.sourceRow || {},
+                  abortSignal,
+                })
+              ),
           });
 
           metadata = await this.getCampaignMetadata(campaignId);
@@ -1977,17 +2153,21 @@ class CampaignStorage {
           }
 
           const previewResult = await this.runPipelineStage({
+            campaignId,
             stageName: "buildSendPreview",
             rowNumber: row.rowNumber,
             execute: () =>
-              this.pipelineHandlers.buildSendPreview({
-                campaignId,
-                rowNumber: row.rowNumber,
-                websiteUrl,
-                jinaContent,
-                sourceRow: previewRow?.sourceRow || row.sourceRow || {},
-                contactEmail: previewRow?.contactEmail || row.contactEmail || "",
-              }),
+              this.withRunAbortSignal(campaignId, (abortSignal) =>
+                this.pipelineHandlers.buildSendPreview({
+                  campaignId,
+                  rowNumber: row.rowNumber,
+                  websiteUrl,
+                  jinaContent,
+                  sourceRow: previewRow?.sourceRow || row.sourceRow || {},
+                  contactEmail: previewRow?.contactEmail || row.contactEmail || "",
+                  abortSignal,
+                })
+              ),
           });
 
           const previewTo = normalizeRecipientEmail(previewResult?.to || "");
@@ -2033,23 +2213,27 @@ class CampaignStorage {
           if (this.pipelineHandlers.sendPreparedEmail) {
             failureStage = "sendPreparedEmail";
             const sent = await this.runPipelineStage({
+              campaignId,
               stageName: "sendPreparedEmail",
               rowNumber: row.rowNumber,
               execute: () =>
-                this.pipelineHandlers.sendPreparedEmail({
-                  campaignId,
-                  rowNumber: row.rowNumber,
-                  to: previewTo,
-                  subject: previewSubject,
-                  body: previewBody,
-                  mailerFields: previewResult?.mailerFields || {},
-                }),
+                this.withRunAbortSignal(campaignId, (abortSignal) =>
+                  this.pipelineHandlers.sendPreparedEmail({
+                    campaignId,
+                    rowNumber: row.rowNumber,
+                    to: previewTo,
+                    subject: previewSubject,
+                    body: previewBody,
+                    mailerFields: previewResult?.mailerFields || {},
+                    abortSignal,
+                  })
+                ),
             });
             const sentAt = compact(sent?.sentAt) || new Date().toISOString();
             const messageId = compact(sent?.messageId);
             const mailerSendDelayMs = getMailerSendDelayMs();
             if (mailerSendDelayMs > 0) {
-              await waitMs(mailerSendDelayMs);
+              await this.waitWithRunStop(campaignId, mailerSendDelayMs, "send-delay");
             }
 
             await this.updateEnrichedRow({
@@ -2098,6 +2282,9 @@ class CampaignStorage {
           finalRow.skipAutoPreview = false;
         }
       } catch (error) {
+        if (this.isRunStopError(error)) {
+          return this.getCampaignMetadata(campaignId);
+        }
         const failureMessage = truncateCellText(error.message || "Unknown enrichment error");
         const failureTrace = truncateCellText(formatFetchTrace(error?.fetchTrace || error?.layerTrace));
         const fetchStageFailure = failureStage === "websiteFetch";
@@ -2188,6 +2375,7 @@ class CampaignStorage {
   }
 
   async processCampaignRowsConcurrent(campaignId, targetRows) {
+    this.assertRunNotStopped(campaignId, "concurrent-run-start");
     const fetchWorkers = Math.max(1, Math.min(this.rowConcurrency, Math.max(1, targetRows)));
     const generationWorkers = Math.max(1, Math.min(this.generationConcurrency, Math.max(1, targetRows)));
     console.log(
@@ -2201,8 +2389,10 @@ class CampaignStorage {
       this.runConcurrentCampaignGenerationWorker(campaignId, targetRows, index + 1, () => fetchCompleted)
     );
     await Promise.all(fetchPromises);
+    this.assertRunNotStopped(campaignId, "concurrent-fetch-complete");
     fetchCompleted = true;
     await Promise.all(generationPromises);
+    this.assertRunNotStopped(campaignId, "concurrent-generation-complete");
 
     return this.withCampaignLock(campaignId, async () => {
       const metadata = await this.getCampaignMetadata(campaignId);
@@ -2226,6 +2416,7 @@ class CampaignStorage {
 
   async runConcurrentCampaignFetchWorker(campaignId, targetRows, workerId) {
     while (true) {
+      this.assertRunNotStopped(campaignId, `fetch-worker-${workerId}`);
       const claim = await this.claimNextFetchRow(campaignId, targetRows);
       if (!claim?.rowNumber) {
         return;
@@ -2240,6 +2431,7 @@ class CampaignStorage {
 
   async runConcurrentCampaignGenerationWorker(campaignId, targetRows, workerId, isFetchCompleted) {
     while (true) {
+      this.assertRunNotStopped(campaignId, `generation-worker-${workerId}`);
       const claim = await this.claimNextGenerationRow(campaignId, targetRows);
       if (claim?.rowNumber) {
         await this.processSingleCampaignRowGenerationConcurrent({
@@ -2252,7 +2444,7 @@ class CampaignStorage {
       if (isFetchCompleted()) {
         return;
       }
-      await new Promise((resolve) => setTimeout(resolve, 250));
+      await this.waitWithRunStop(campaignId, 250, `generation-worker-${workerId}-wait`);
     }
   }
 
@@ -2268,6 +2460,7 @@ class CampaignStorage {
     const row = metadata.rows[rowIndex];
     const rowStartedAt = Date.parse(String(row.startedAt || "")) || Date.now();
     try {
+      this.assertRunNotStopped(campaignId, `fetch-row-${rowNumber}`);
       const profileSearchOnly = this.profileSearchOnly;
       const websiteUrl = normalizeWebsiteUrl(firstNonEmpty(row.websiteUrl, row.sourceRow?.[metadata.websiteColumn]));
       const companyNameForFetch = resolveCompanyNameForFetch(row, row.sourceRow || {});
@@ -2297,32 +2490,40 @@ class CampaignStorage {
         });
       };
 
-      const websiteResult = await enrichWebsiteContent(websiteUrl, {
-        fetchImpl: this.fetchWithProxy.bind(this),
-        requestTimeoutMs: this.requestTimeoutMs,
-        playwrightEnabled: this.playwrightEnabled,
-        playwrightTimeoutMs: this.playwrightTimeoutMs,
-        chromeProfileEnabled: this.chromeProfileEnabled,
-        chromeExecutablePath: this.chromeExecutablePath,
-        chromeAutomationUserDataDir: workerAutomationUserDataDir,
-        chromeForceMirrorProfile: this.chromeForceMirrorProfile,
-        chromeHeadless: this.chromeHeadless,
-        chromeHeadlessFallback: this.chromeHeadlessFallback,
-        subpageFetchEnabled: this.subpageFetchEnabled,
-        subPageMaxCount: this.subPageMaxCount,
-        chromeCookiesEnabled: this.chromeCookiesEnabled,
-        chromeUserDataDir: this.chromeUserDataDir,
-        chromeProfileName: this.chromeProfileDirectory,
-        chromeTimeoutMs: this.chromeTimeoutMs,
-        searchSnippetEnabled: this.searchSnippetEnabled,
-        searchSnippetMaxLines: this.searchSnippetMaxLines,
-        companyName: companyNameForFetch,
-        profileSearchOnly,
-        campaignId,
-        rowNumber,
-        rowIndex: rowNumber,
-        notifyUI,
-      });
+      const fetchAbortController = this.registerRunAbortController(campaignId);
+      const websiteResult = await (async () => {
+        try {
+          return await enrichWebsiteContent(websiteUrl, {
+            fetchImpl: this.fetchWithProxy.bind(this),
+            requestTimeoutMs: this.requestTimeoutMs,
+            playwrightEnabled: this.playwrightEnabled,
+            playwrightTimeoutMs: this.playwrightTimeoutMs,
+            chromeProfileEnabled: this.chromeProfileEnabled,
+            chromeExecutablePath: this.chromeExecutablePath,
+            chromeAutomationUserDataDir: workerAutomationUserDataDir,
+            chromeForceMirrorProfile: this.chromeForceMirrorProfile,
+            chromeHeadless: this.chromeHeadless,
+            chromeHeadlessFallback: this.chromeHeadlessFallback,
+            subpageFetchEnabled: this.subpageFetchEnabled,
+            subPageMaxCount: this.subPageMaxCount,
+            chromeCookiesEnabled: this.chromeCookiesEnabled,
+            chromeUserDataDir: this.chromeUserDataDir,
+            chromeProfileName: this.chromeProfileDirectory,
+            chromeTimeoutMs: this.chromeTimeoutMs,
+            searchSnippetEnabled: this.searchSnippetEnabled,
+            searchSnippetMaxLines: this.searchSnippetMaxLines,
+            companyName: companyNameForFetch,
+            profileSearchOnly,
+            campaignId,
+            rowNumber,
+            rowIndex: rowNumber,
+            notifyUI,
+            abortSignal: fetchAbortController?.signal,
+          });
+        } finally {
+          this.releaseRunAbortController(campaignId, fetchAbortController);
+        }
+      })();
 
       if (Array.isArray(websiteResult.fetchTrace) && websiteResult.fetchTrace.length > 0) {
         console.log(`[campaign-row-trace] row=${rowNumber} ${websiteResult.fetchTrace.join(" | ")}`);
@@ -2407,6 +2608,9 @@ class CampaignStorage {
         currentMetadata.resumeFromRow = this.findNextPendingRowNumber(currentMetadata.rows, currentRowIndex + 1);
       });
     } catch (error) {
+      if (this.isRunStopError(error)) {
+        return;
+      }
       const failureMessage = truncateCellText(error.message || "Unknown enrichment error");
       const failureTrace = truncateCellText(formatFetchTrace(error?.fetchTrace || error?.layerTrace));
       console.error(
@@ -2468,6 +2672,7 @@ class CampaignStorage {
     let failureStage = "buildMailerDoc";
 
     try {
+      this.assertRunNotStopped(campaignId, `generation-row-${rowNumber}`);
       if (!isCampaignRunningStatus(metadata.status)) {
         return;
       }
@@ -2477,16 +2682,20 @@ class CampaignStorage {
       if (this.pipelineHandlers.buildMailerDoc) {
         const mailContext = await this.resolveRowGenerationContext({ campaignId, rowNumber });
         const mailerResult = await this.runPipelineStage({
+          campaignId,
           stageName: "buildMailerDoc",
           rowNumber,
           execute: () =>
-            this.pipelineHandlers.buildMailerDoc({
-              campaignId,
-              rowNumber,
-              websiteUrl,
-              jinaContent,
-              sourceRow: mailContext.sourceRow || {},
-            }),
+            this.withRunAbortSignal(campaignId, (abortSignal) =>
+              this.pipelineHandlers.buildMailerDoc({
+                campaignId,
+                rowNumber,
+                websiteUrl,
+                jinaContent,
+                sourceRow: mailContext.sourceRow || {},
+                abortSignal,
+              })
+            ),
         });
 
         await this.patchCampaignRow(campaignId, rowNumber, (mailRow) => {
@@ -2513,17 +2722,21 @@ class CampaignStorage {
 
         const previewContext = await this.resolveRowGenerationContext({ campaignId, rowNumber });
         const previewResult = await this.runPipelineStage({
+          campaignId,
           stageName: "buildSendPreview",
           rowNumber,
           execute: () =>
-            this.pipelineHandlers.buildSendPreview({
-              campaignId,
-              rowNumber,
-              websiteUrl,
-              jinaContent,
-              sourceRow: previewContext.sourceRow || {},
-              contactEmail: previewContext.contactEmail || "",
-            }),
+            this.withRunAbortSignal(campaignId, (abortSignal) =>
+              this.pipelineHandlers.buildSendPreview({
+                campaignId,
+                rowNumber,
+                websiteUrl,
+                jinaContent,
+                sourceRow: previewContext.sourceRow || {},
+                contactEmail: previewContext.contactEmail || "",
+                abortSignal,
+              })
+            ),
         });
 
         const previewTo = normalizeRecipientEmail(previewResult?.to || "");
@@ -2570,23 +2783,27 @@ class CampaignStorage {
         if (this.pipelineHandlers.sendPreparedEmail) {
           failureStage = "sendPreparedEmail";
           const sent = await this.runPipelineStage({
+            campaignId,
             stageName: "sendPreparedEmail",
             rowNumber,
             execute: () =>
-              this.pipelineHandlers.sendPreparedEmail({
-                campaignId,
-                rowNumber,
-                to: previewTo,
-                subject: previewSubject,
-                body: previewBody,
-                mailerFields: previewResult?.mailerFields || {},
-              }),
+              this.withRunAbortSignal(campaignId, (abortSignal) =>
+                this.pipelineHandlers.sendPreparedEmail({
+                  campaignId,
+                  rowNumber,
+                  to: previewTo,
+                  subject: previewSubject,
+                  body: previewBody,
+                  mailerFields: previewResult?.mailerFields || {},
+                  abortSignal,
+                })
+              ),
           });
           const sentAt = compact(sent?.sentAt) || new Date().toISOString();
           const messageId = compact(sent?.messageId);
           const mailerSendDelayMs = getMailerSendDelayMs();
           if (mailerSendDelayMs > 0) {
-            await waitMs(mailerSendDelayMs);
+            await this.waitWithRunStop(campaignId, mailerSendDelayMs, "send-delay");
           }
 
           await this.updateEnrichedRow({
@@ -2638,6 +2855,9 @@ class CampaignStorage {
         currentMetadata.resumeFromRow = this.findNextPendingRowNumber(currentMetadata.rows, currentRowIndex + 1);
       });
     } catch (error) {
+      if (this.isRunStopError(error)) {
+        return;
+      }
       const failureMessage = truncateCellText(error.message || "Unknown enrichment error");
       console.error(
         `[campaign-row] row=${rowNumber} website=${row.websiteUrl || ""} stage=${failureStage} failed: ${failureMessage}`
@@ -2753,6 +2973,7 @@ class CampaignStorage {
 
   async stopCampaign(campaignId) {
     const normalizedCampaignId = compact(campaignId);
+    this.requestRunStop(normalizedCampaignId, "Campaign stop requested by user");
     return this.withCampaignLock(normalizedCampaignId, async () => {
       const metadata = await this.getCampaignMetadata(normalizedCampaignId);
       if (!metadata) {
@@ -2792,7 +3013,7 @@ class CampaignStorage {
 
     const status = String(metadata.status || "").toLowerCase();
     const hasActiveRun = this.activeRuns.has(normalizedCampaignId);
-    if (status === CAMPAIGN_STATUS_RUNNING || hasActiveRun) {
+    if (status === CAMPAIGN_STATUS_RUNNING || hasActiveRun || this.isRunStopRequested(normalizedCampaignId)) {
       await this.stopCampaign(normalizedCampaignId);
       await this.waitForCampaignRunToStop(normalizedCampaignId, timeoutMs);
     }
@@ -2878,6 +3099,8 @@ class CampaignStorage {
           emailSubject: "",
           emailGeneratedBody: "",
           emailBody: "",
+          senderEmail: "",
+          senderDomain: "",
           emailStatus,
           mailerFields: {},
           docFileName: "",
@@ -2946,6 +3169,8 @@ class CampaignStorage {
       [EMAIL_SENT_AT_COLUMN]: "",
       [EMAIL_MESSAGE_ID_COLUMN]: "",
       [EMAIL_ERROR_COLUMN]: "",
+      [EMAIL_SENDER_COLUMN]: "",
+      [EMAIL_SENDER_DOMAIN_COLUMN]: "",
       [EMAIL_STATUS_COLUMN]: "pending",
     };
 
@@ -2980,6 +3205,8 @@ class CampaignStorage {
       row.emailSubject = "";
       row.emailGeneratedBody = "";
       row.emailBody = "";
+      row.senderEmail = "";
+      row.senderDomain = "";
       row.emailStatus = "pending";
       row.mailerFields = {};
       row.docFileName = "";
@@ -3218,6 +3445,8 @@ class CampaignStorage {
       row[EMAIL_SENT_AT_COLUMN] = compact(row[EMAIL_SENT_AT_COLUMN]);
       row[EMAIL_MESSAGE_ID_COLUMN] = compact(row[EMAIL_MESSAGE_ID_COLUMN]);
       row[EMAIL_ERROR_COLUMN] = compact(row[EMAIL_ERROR_COLUMN]);
+      row[EMAIL_SENDER_COLUMN] = compact(row[EMAIL_SENDER_COLUMN]);
+      row[EMAIL_SENDER_DOMAIN_COLUMN] = compact(row[EMAIL_SENDER_DOMAIN_COLUMN]);
       row[EMAIL_STATUS_COLUMN] = compact(row[EMAIL_STATUS_COLUMN]) || "pending";
 
       if (index >= limit) {
@@ -3277,6 +3506,8 @@ class CampaignStorage {
         emailSubject: "",
         emailGeneratedBody: "",
         emailBody: "",
+        senderEmail: compact(row[EMAIL_SENDER_COLUMN]),
+        senderDomain: compact(row[EMAIL_SENDER_DOMAIN_COLUMN]),
         mailerFields: {},
         docFileName: "",
         sourceRow,
@@ -3329,6 +3560,8 @@ class CampaignStorage {
         EMAIL_SENT_AT_COLUMN,
         EMAIL_MESSAGE_ID_COLUMN,
         EMAIL_ERROR_COLUMN,
+        EMAIL_SENDER_COLUMN,
+        EMAIL_SENDER_DOMAIN_COLUMN,
       ],
       availableRows: rows.length,
       processedRows: 0,
@@ -3477,6 +3710,12 @@ class CampaignStorage {
         if (Object.prototype.hasOwnProperty.call(appliedUpdates, EMAIL_BODY_COLUMN)) {
           rowEntry.emailBody = compact(appliedUpdates[EMAIL_BODY_COLUMN]);
         }
+        if (Object.prototype.hasOwnProperty.call(appliedUpdates, EMAIL_SENDER_COLUMN)) {
+          rowEntry.senderEmail = compact(appliedUpdates[EMAIL_SENDER_COLUMN]);
+        }
+        if (Object.prototype.hasOwnProperty.call(appliedUpdates, EMAIL_SENDER_DOMAIN_COLUMN)) {
+          rowEntry.senderDomain = compact(appliedUpdates[EMAIL_SENDER_DOMAIN_COLUMN]);
+        }
       }
 
       await this.writeCampaignMetadata(normalizedCampaignId, metadata);
@@ -3544,6 +3783,8 @@ module.exports = {
   EMAIL_SENT_AT_COLUMN,
   EMAIL_MESSAGE_ID_COLUMN,
   EMAIL_ERROR_COLUMN,
+  EMAIL_SENDER_COLUMN,
+  EMAIL_SENDER_DOMAIN_COLUMN,
   buildJinaReaderUrl,
   buildLinkedInQueries,
   buildLinkedInSearchUrls,

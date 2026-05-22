@@ -24,9 +24,11 @@ const {
   EMAIL_SENT_AT_COLUMN,
   EMAIL_MESSAGE_ID_COLUMN,
   EMAIL_ERROR_COLUMN,
+  EMAIL_SENDER_COLUMN,
+  EMAIL_SENDER_DOMAIN_COLUMN,
 } = require("./services/campaignStorage");
 const { MailerDocService } = require("./services/mailerDocService");
-const { verifyMailer, isMailerConfigured, sendEmail } = require("./services/mailerSendService");
+const { verifyMailer, isMailerConfigured, sendEmail, listSenders } = require("./services/mailerSendService");
 const { CampaignSendService } = require("./services/campaignSendService");
 const { checkChromeCookieAvailability } = require("./services/chromeCookieService");
 const { resumeVerification, skipVerification } = require("./services/verificationStateService");
@@ -83,6 +85,38 @@ function notifyCampaignUI(campaignId, event) {
 
 function compact(value) {
   return String(value || "").trim();
+}
+
+function normalizeEmail(value) {
+  return compact(value).toLowerCase();
+}
+
+function getDomainFromEmail(value) {
+  const email = normalizeEmail(value);
+  const at = email.lastIndexOf("@");
+  if (at < 1 || at >= email.length - 1) {
+    return "";
+  }
+  return email.slice(at + 1);
+}
+
+function getCampaignDomainUsage(metadata = {}) {
+  const usage = {};
+  const rows = Array.isArray(metadata?.rows) ? metadata.rows : [];
+  for (const row of rows) {
+    const emailStatus = normalizeEmail(row?.emailStatus || row?.sourceRow?.email_status);
+    if (emailStatus !== "sent") {
+      continue;
+    }
+    const senderDomain = normalizeEmail(
+      row?.senderDomain || row?.sourceRow?.[EMAIL_SENDER_DOMAIN_COLUMN] || getDomainFromEmail(row?.senderEmail || row?.sourceRow?.[EMAIL_SENDER_COLUMN])
+    );
+    if (!senderDomain) {
+      continue;
+    }
+    usage[senderDomain] = (Number(usage[senderDomain]) || 0) + 1;
+  }
+  return usage;
 }
 
 function isWarmupEnabled() {
@@ -309,7 +343,7 @@ async function warmupModelInstances(reason = "manual") {
 campaignStorage.setCampaignEventNotifier((campaignId, event) => notifyCampaignUI(campaignId, event));
 
 campaignStorage.setPipelineHandlers({
-  buildMailerDoc: async ({ campaignId, rowNumber, websiteUrl, jinaContent, sourceRow }) => {
+  buildMailerDoc: async ({ campaignId, rowNumber, websiteUrl, jinaContent, sourceRow, abortSignal }) => {
     const context = await campaignStorage.resolveRowGenerationContext({
       campaignId,
       rowNumber,
@@ -322,6 +356,7 @@ campaignStorage.setPipelineHandlers({
       websiteUrl: context.websiteUrl,
       jinaContent: context.jinaContent,
       sourceRow: context.sourceRow,
+      abortSignal,
     });
     return {
       ok: true,
@@ -331,7 +366,7 @@ campaignStorage.setPipelineHandlers({
       mailerFields,
     };
   },
-  buildSendPreview: async ({ campaignId, rowNumber, websiteUrl, jinaContent, sourceRow, contactEmail }) => {
+  buildSendPreview: async ({ campaignId, rowNumber, websiteUrl, jinaContent, sourceRow, contactEmail, abortSignal }) => {
     const context = await campaignStorage.resolveRowGenerationContext({
       campaignId,
       rowNumber,
@@ -348,6 +383,7 @@ campaignStorage.setPipelineHandlers({
       sourceRow: context.sourceRow,
       contactEmail: context.contactEmail,
       draftIterations: 1,
+      abortSignal,
     });
   },
   // Campaign pipeline now only prepares previews; actual sends are manual via Send/Send All endpoints.
@@ -466,6 +502,29 @@ app.get("/health", (_req, res) => {
     linkedInFetchMode: config.linkedInFetchMode,
     mailConfigured: isMailerConfigured(),
   });
+});
+
+app.get("/api/mail/senders", async (req, res) => {
+  try {
+    const senders = await listSenders();
+    const defaultSenderEmail = compact(process.env.BREVO_FROM);
+    const defaultSenderName = compact(process.env.BREVO_FROM_NAME) || "Cold Mailbot";
+    const campaignId = compact(req.query?.campaignId);
+    const campaignMetadata = campaignId ? await campaignStorage.getCampaignMetadata(campaignId) : null;
+    const domainUsage = campaignMetadata ? getCampaignDomainUsage(campaignMetadata) : {};
+    return res.json({
+      ok: true,
+      defaultSender: {
+        email: defaultSenderEmail,
+        name: defaultSenderName,
+      },
+      bulkDomainLimit: 30,
+      domainUsage,
+      senders,
+    });
+  } catch (error) {
+    return res.status(502).json({ error: error.message });
+  }
 });
 
 app.get("/api/settings/chrome-cookies", (_req, res) => {
@@ -628,7 +687,12 @@ app.post("/api/campaigns/:campaignId/resume", async (req, res) => {
 
 app.post("/api/campaigns/:campaignId/stop", async (req, res) => {
   try {
-    const campaign = await campaignStorage.stopCampaign(req.params.campaignId);
+    const normalizedCampaignId = String(req.params.campaignId || "").trim();
+    await campaignStorage.stopCampaignAndWaitForIdle(normalizedCampaignId, {
+      timeoutMs: Number.parseInt(process.env.CAMPAIGN_STOP_WAIT_TIMEOUT_MS, 10) || 180000,
+    });
+    await unloadModelInstances(`stop:${normalizedCampaignId || "unknown"}`);
+    const campaign = await campaignStorage.getCampaignMetadata(normalizedCampaignId);
     return res.json({
       ok: true,
       campaign,
@@ -645,7 +709,8 @@ app.post("/api/campaigns/:campaignId/reset", async (req, res) => {
       timeoutMs: Number.parseInt(process.env.CAMPAIGN_RESET_WAIT_TIMEOUT_MS, 10) || 180000,
     });
     await unloadModelInstances(`reset:${String(req.params.campaignId || "").trim() || "unknown"}`);
-    const campaign = await campaignStorage.resetCampaign(normalizedCampaignId);
+    await campaignStorage.resetCampaign(normalizedCampaignId);
+    const campaign = await campaignStorage.resumeCampaign(normalizedCampaignId);
     return res.json({
       ok: true,
       campaign,
@@ -844,8 +909,27 @@ app.post("/api/campaigns/send", async (req, res) => {
     return res.status(400).json({ errors: toValidationErrors(parsed.error.issues) });
   }
   try {
+    const domainLimit = 30;
+    const requestedSenderEmail = compact(parsed.data.senderEmail) || compact(process.env.BREVO_FROM);
+    const requestedSenderDomain = getDomainFromEmail(requestedSenderEmail);
+    if (parsed.data.enforceDomainBulkLimit && requestedSenderDomain) {
+      const campaignMetadata = await campaignStorage.getCampaignMetadata(parsed.data.campaignId);
+      const usageByDomain = getCampaignDomainUsage(campaignMetadata || {});
+      const used = Number(usageByDomain[requestedSenderDomain]) || 0;
+      if (used >= domainLimit) {
+        return res.status(409).json({
+          error: `Bulk limit reached for domain ${requestedSenderDomain}: ${used}/${domainLimit}`,
+          domain: requestedSenderDomain,
+          used,
+          limit: domainLimit,
+        });
+      }
+    }
+
     const sent = await campaignSendService.sendPreparedEmail(parsed.data);
     const emailStatus = "sent";
+    const sentSenderEmail = compact(sent?.sender?.email) || requestedSenderEmail;
+    const sentSenderDomain = getDomainFromEmail(sentSenderEmail);
     await campaignStorage.updateEnrichedRow({
       campaignId: parsed.data.campaignId,
       rowNumber: parsed.data.rowNumber,
@@ -856,6 +940,8 @@ app.post("/api/campaigns/send", async (req, res) => {
         [EMAIL_SENT_AT_COLUMN]: sent.sentAt || new Date().toISOString(),
         [EMAIL_MESSAGE_ID_COLUMN]: sent.messageId,
         [EMAIL_ERROR_COLUMN]: "",
+        [EMAIL_SENDER_COLUMN]: sentSenderEmail,
+        [EMAIL_SENDER_DOMAIN_COLUMN]: sentSenderDomain,
         [EMAIL_STATUS_COLUMN]: emailStatus,
       },
     });
@@ -864,6 +950,7 @@ app.post("/api/campaigns/send", async (req, res) => {
     return res.json({
       ...sent,
       emailStatus,
+      domainUsage: getCampaignDomainUsage(campaignMetadata || {}),
     });
   } catch (error) {
     try {
@@ -878,7 +965,7 @@ app.post("/api/campaigns/send", async (req, res) => {
     } catch (_persistError) {
       // Keep API failure reason as the primary error response.
     }
-    const statusCode = /recipient email|gmail smtp is not configured|gmail_user|gmail_app_pass|subject and body/i.test(
+    const statusCode = /recipient email|selected sender|inactive in brevo|gmail smtp is not configured|gmail_user|gmail_app_pass|subject and body|bulk limit reached/i.test(
       error.message
     )
       ? 400

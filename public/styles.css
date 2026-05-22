@@ -623,6 +623,7 @@ textarea {
   display: flex;
   align-items: center;
   gap: 6px;
+  flex-wrap: wrap;
 }
 
 .send-all-count-label {
@@ -640,6 +641,28 @@ textarea {
   background: #10151d;
   color: var(--text-primary);
   font-family: var(--font-mono);
+}
+
+#senderSelect {
+  min-width: 230px;
+  max-width: 340px;
+  height: 34px;
+  padding: 0 8px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-subtle);
+  background: #10151d;
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+}
+
+#senderSelect:focus {
+  outline: none;
+  border-color: var(--border-active);
+}
+
+#senderMeta {
+  font-size: 0.74rem;
+  line-height: 1.15;
 }
 
 #sendAllCountInput:focus {
@@ -1372,8 +1395,8 @@ textarea {
 
   .campaign-send-controls {
     width: 100%;
-    display: grid;
-    grid-template-columns: auto 80px 1fr;
+    display: flex;
+    flex-wrap: wrap;
   }
 
   .form-grid {

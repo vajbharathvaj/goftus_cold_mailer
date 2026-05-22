@@ -335,11 +335,12 @@ class MailerDocService {
     this.ollamaClient = ollamaClient;
   }
 
-  async buildMailerFieldsForCampaignRow({ rowNumber, websiteUrl, jinaContent, sourceRow }) {
+  async buildMailerFieldsForCampaignRow({ rowNumber, websiteUrl, jinaContent, sourceRow, abortSignal } = {}) {
     const cleanSourceRow = safeSourceRow(sourceRow);
     const raw = await this.ollamaClient.generate({
       system: buildSystemPrompt(),
       prompt: buildPrompt({ rowNumber, websiteUrl, jinaContent, sourceRow: cleanSourceRow }),
+      options: { abortSignal },
     });
 
     let parsed = {};
@@ -354,12 +355,13 @@ class MailerDocService {
     return normalizeMailerFields(parsed, websiteUrl, cleanSourceRow);
   }
 
-  async generateForCampaignRow({ campaignId, rowNumber, websiteUrl, jinaContent, sourceRow }) {
+  async generateForCampaignRow({ campaignId, rowNumber, websiteUrl, jinaContent, sourceRow, abortSignal } = {}) {
     const mailerFields = await this.buildMailerFieldsForCampaignRow({
       rowNumber,
       websiteUrl,
       jinaContent,
       sourceRow,
+      abortSignal,
     });
     const targetDir = path.join(STORAGE_ROOT, campaignId);
     await fs.mkdir(targetDir, { recursive: true });

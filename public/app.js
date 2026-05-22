@@ -4,7 +4,8 @@ const POLL_MS=4000;
 const PREVIEW_LEN=320;
 const BULK_DELAY_MIN_MS=1000;
 const BULK_DELAY_MAX_MS=10000;
-const state={view:'campaign',file:null,campaign:null,campaignSig:'',expanded:null,selectedRows:new Set(),previews:new Map(),poll:null,pollBusy:false,eventSource:null,eventReconnect:null,eventCampaignId:'',verification:new Map(),bulkSend:{active:false,total:0,sent:0,failed:0,currentRow:null,nextDelayMs:0,message:''}};
+const BULK_DOMAIN_LIMIT=30;
+const state={view:'campaign',file:null,campaign:null,campaignSig:'',expanded:null,selectedRows:new Set(),selectionAnchorRow:null,previews:new Map(),poll:null,pollBusy:false,eventSource:null,eventReconnect:null,eventCampaignId:'',verification:new Map(),bulkSend:{active:false,total:0,sent:0,failed:0,currentRow:null,nextDelayMs:0,message:'',stopRequested:false},mailSenders:{loading:false,error:'',list:[],selectedEmail:'',selectedName:'',defaultEmail:'',defaultName:'',bulkUsageByDomain:{}}};
 
 const form=$('#leadForm');
 const navBtns=document.querySelectorAll('.nav-item');
@@ -50,6 +51,10 @@ const historyList=$('#historyList');
 const sendAllBtn=$('#sendAllBtn');
 const sendAllMeta=$('#sendAllMeta');
 const sendAllCountInput=$('#sendAllCountInput');
+const sendBulk30Btn=$('#sendBulk30Btn');
+const senderSelect=$('#senderSelect');
+const senderMeta=$('#senderMeta');
+const refreshSendersBtn=$('#refreshSendersBtn');
 
 const ollamaDot=$('#ollamaDot');
 const ollamaText=$('#ollamaText');
@@ -72,15 +77,26 @@ const j=v=>{try{return JSON.stringify(v,null,2);}catch{return String(v);}};
 const statusNorm=s=>['running','paused','completed','stopped','failed'].includes(String(s||'').toLowerCase())?String(s).toLowerCase():'queued';
 const fmtMs=ms=>{const n=Math.max(0,Number(ms)||0);if(n<1000)return `${n}ms`;const s=n/1000;if(s<60)return `${s.toFixed(1)}s`;return `${Math.floor(s/60)}m ${Math.round(s%60)}s`;};
 const ago=iso=>{const ts=Date.parse(String(iso||''));if(!Number.isFinite(ts))return '-';const d=Math.max(0,Math.round((Date.now()-ts)/1000));if(d<60)return `${d}s ago`;if(d<3600)return `${Math.floor(d/60)}m ago`;return `${Math.floor(d/3600)}h ago`;};
+const compact=v=>String(v||'').trim();
+const lower=v=>compact(v).toLowerCase();
+const senderDomainFromEmail=email=>{const v=lower(email);const at=v.lastIndexOf('@');if(at<1||at>=v.length-1)return'';return v.slice(at+1);};
+function normalizeSender(item){const email=compact(item?.email);return{id:Number.isFinite(Number(item?.id))?Number(item.id):null,name:compact(item?.name),email,domain:senderDomainFromEmail(email),active:item?.active!==false};}
+function domainUsage(domain){const d=lower(domain);if(!d)return 0;return Math.max(0,Number(state.mailSenders.bulkUsageByDomain?.[d]||0));}
+function senderRemainingForBulk(sender){const domain=senderDomainFromEmail(sender?.email||'');if(!domain)return 0;return Math.max(0,BULK_DOMAIN_LIMIT-domainUsage(domain));}
+function selectedSender(){const email=lower(state.mailSenders.selectedEmail);const list=Array.isArray(state.mailSenders.list)?state.mailSenders.list:[];const found=list.find(item=>lower(item.email)===email);if(found)return found;const fallbackEmail=compact(state.mailSenders.defaultEmail);if(fallbackEmail)return {id:null,email:fallbackEmail,name:compact(state.mailSenders.defaultName),domain:senderDomainFromEmail(fallbackEmail),active:true};return null;}
+function incDomainUsage(domain,count=1){const d=lower(domain);if(!d)return;const next=Math.max(0,domainUsage(d)+Math.max(0,Number(count)||0));state.mailSenders.bulkUsageByDomain[d]=next;}
 function campaignFingerprint(c){const rows=Array.isArray(c?.rows)?c.rows:[];return j({id:c?.id,status:c?.status,processedRows:c?.processedRows,succeeded:c?.succeeded,failed:c?.failed,resumeFromRow:c?.resumeFromRow,pausedAtRow:c?.pausedAtRow,rows:rows.map(r=>[r?.rowNumber,r?.status,r?.durationMs,r?.error,r?.jinaFetchMethod,r?.jinaError,r?.emailStatus,r?.emailSubject,r?.emailTo,r?.docFileName,r?.startedAt,r?.completedAt])});}
 function setCampaign(next,{force=false}={}){
 if(!next)return false;
 const nextId=String(next?.id||'');
 const prevId=String(state.campaign?.id||'');
-if(nextId&&prevId&&nextId!==prevId){
+if(nextId&&nextId!==prevId){
 state.verification.clear();
 state.selectedRows.clear();
+state.selectionAnchorRow=null;
+state.mailSenders.bulkUsageByDomain={};
 closeVerificationPopup();
+void loadMailSenders({silent:true});
 }
 const fp=campaignFingerprint(next);
 if(!force&&fp===state.campaignSig)return false;
@@ -88,6 +104,7 @@ state.campaign=next;
 state.campaignSig=fp;
 const keep=new Set((Array.isArray(next?.rows)?next.rows:[]).map(r=>Number(r?.rowNumber)).filter(n=>Number.isFinite(n)));
 for(const selected of Array.from(state.selectedRows)){if(!keep.has(Number(selected)))state.selectedRows.delete(Number(selected));}
+if(!keep.has(Number(state.selectionAnchorRow)))state.selectionAnchorRow=null;
 return true;
 }
 
@@ -101,6 +118,9 @@ function fill(vals){Object.entries(vals||{}).forEach(([k,v])=>{const i=form.elem
 async function api(endpoint,payload,method){const m=method||(endpoint==='/health'?'GET':'POST');const r=await fetch(endpoint,{method:m,cache:'no-store',headers:m==='GET'?{'Cache-Control':'no-cache'}:{'Content-Type':'application/json','Cache-Control':'no-cache'},body:m==='GET'?undefined:JSON.stringify(payload)});if(r.status===304)return {ok:true,notModified:true};const d=await r.json().catch(()=>({}));if(!r.ok)throw new Error(d?.error||`Request failed (${r.status})`);return d;}
 function disableMailer(x){['#fillSample','#testHealth','#generateDraft','#generateSubject','#generateVariants','#generateFull'].forEach(s=>{const n=$(s);if(n)n.disabled=x;});}
 async function mailerRun(fn){try{disableMailer(true);setMainStatus('loading','RUNNING');await fn();setMainStatus('success','SUCCESS');}catch(e){rawOutput.textContent=j({error:e.message||'Request failed'});bodyOutput.textContent=e.message||'Request failed';setMainStatus('error','ERROR');setComplianceBadge(null);}finally{disableMailer(false);}}
+function renderSenderSelect(){if(!senderSelect)return;const list=Array.isArray(state.mailSenders.list)?state.mailSenders.list:[];senderSelect.innerHTML='';if(state.mailSenders.loading){const option=document.createElement('option');option.value='';option.textContent='Loading senders...';senderSelect.appendChild(option);senderSelect.disabled=true;return;}if(list.length<1){const option=document.createElement('option');option.value='';option.textContent='No senders';senderSelect.appendChild(option);senderSelect.disabled=true;return;}list.forEach(item=>{const option=document.createElement('option');option.value=item.email;const domain=item.domain||senderDomainFromEmail(item.email);const used=domainUsage(domain);const stateLabel=item.active?'active':'inactive';option.textContent=`${item.email} (${stateLabel}) | ${used}/${BULK_DOMAIN_LIMIT} used`;if(!item.active)option.disabled=true;senderSelect.appendChild(option);});const activeEmails=list.filter(item=>item.active).map(item=>lower(item.email));const selectedEmail=lower(state.mailSenders.selectedEmail);if(activeEmails.includes(selectedEmail)){senderSelect.value=state.mailSenders.selectedEmail;}else{const fallback=list.find(item=>item.active)||list[0];state.mailSenders.selectedEmail=fallback?.email||'';state.mailSenders.selectedName=fallback?.name||'';senderSelect.value=state.mailSenders.selectedEmail;}senderSelect.disabled=false;}
+function renderSenderMeta(){if(!senderMeta)return;const sender=selectedSender();if(!sender){senderMeta.textContent='No sender selected.';return;}const domain=sender.domain||senderDomainFromEmail(sender.email);const used=domainUsage(domain);const remaining=Math.max(0,BULK_DOMAIN_LIMIT-used);senderMeta.textContent=`Sender: ${sender.email} | Domain: ${domain||'-'} | Bulk usage: ${used}/${BULK_DOMAIN_LIMIT} | Remaining: ${remaining}`;}
+async function loadMailSenders({silent=false}={}){if(state.mailSenders.loading)return;state.mailSenders.loading=true;state.mailSenders.error='';renderSenderSelect();if(refreshSendersBtn)refreshSendersBtn.disabled=true;try{const cid=compact(state.campaign?.id);const endpoint=cid?`/api/mail/senders?campaignId=${encodeURIComponent(cid)}`:'/api/mail/senders';const payload=await api(endpoint,null,'GET');const list=(Array.isArray(payload?.senders)?payload.senders:[]).map(normalizeSender).filter(item=>Boolean(item.email));const usagePayload=payload?.domainUsage&&typeof payload.domainUsage==='object'?payload.domainUsage:{};const usage={};Object.entries(usagePayload).forEach(([domain,count])=>{const key=lower(domain);if(!key)return;usage[key]=Math.max(0,Number(count)||0);});state.mailSenders.bulkUsageByDomain=usage;state.mailSenders.list=list;state.mailSenders.defaultEmail=compact(payload?.defaultSender?.email);state.mailSenders.defaultName=compact(payload?.defaultSender?.name);const selected=selectedSender();if(selected){state.mailSenders.selectedEmail=selected.email;state.mailSenders.selectedName=selected.name;}else if(list.length>0){const match=list.find(item=>lower(item.email)===lower(state.mailSenders.defaultEmail)&&item.active);const fallback=match||list.find(item=>item.active)||list[0];state.mailSenders.selectedEmail=fallback?.email||'';state.mailSenders.selectedName=fallback?.name||'';}renderSenderSelect();renderSenderMeta();if(!silent&&list.length<1){setMainStatus('error','NO SENDERS');}}catch(e){state.mailSenders.error=e.message||'Failed to load senders';if(!silent){rawOutput.textContent=j({error:state.mailSenders.error});setMainStatus('error','SENDERS FAILED');}renderSenderSelect();renderSenderMeta();}finally{state.mailSenders.loading=false;if(refreshSendersBtn)refreshSendersBtn.disabled=false;renderSenderSelect();renderSenderMeta();}}
 
 function renderVariants(v){if(!Array.isArray(v)||!v.length){variantsOutput.innerHTML='<p class="muted">No variants yet.</p>';return;}variantsOutput.innerHTML='';v.forEach((it,idx)=>{const a=document.createElement('article');a.className='variant-item';a.innerHTML=`<h4 class="mono">Variant ${it.label||String.fromCharCode(65+idx)}</h4><p>Subject: ${it.subject||'-'}</p><p>${it.body||'-'}</p>`;variantsOutput.appendChild(a);});}
 function renderMailer(d){if(Array.isArray(d?.variants)){subjectOutput.textContent='Generated variants';bodyOutput.textContent=`${d.variants.length} variants returned.`;complianceOutput.textContent=j({attempts:d.attempts,requiresHumanReview:d.requiresHumanReview});renderVariants(d.variants);rawOutput.textContent=j(d);setComplianceBadge(null);return;}subjectOutput.textContent=d.subject||'No subject returned.';bodyOutput.textContent=d.body||d.draft||'No body returned.';complianceOutput.textContent=d.compliance?j(d.compliance):'No compliance data.';rawOutput.textContent=j(d);setComplianceBadge(d.compliance);renderVariants([]);}
@@ -124,7 +144,7 @@ function showVerificationPopup(event){const campaignId=String(event?.campaignId|
 function handleCampaignEvent(event){if(!event||typeof event!=='object')return;const eventType=String(event.type||'').toLowerCase();const rowNumber=parseEventRow(event);if(eventType==='verification_required'){markVerification(rowNumber,{status:'awaiting',domain:event.domain,message:event.message});showVerificationPopup(event);renderCampaign();return;}if(eventType==='verification_cleared'){clearVerification(rowNumber);closeVerificationPopup();renderCampaign();return;}if(eventType==='row_skipped'){clearVerification(rowNumber);closeVerificationPopup();renderCampaign();}}
 function connectCampaignEvents(campaignId){const cid=String(campaignId||'').trim();if(!cid)return;if(state.eventCampaignId===cid&&state.eventSource)return;closeCampaignEvents();state.eventCampaignId=cid;try{const es=new EventSource(`/api/campaigns/${encodeURIComponent(cid)}/events`);state.eventSource=es;es.onmessage=(evt)=>{try{const payload=JSON.parse(evt.data||'{}');handleCampaignEvent(payload);}catch{}};es.onerror=()=>{if(state.eventCampaignId!==cid)return;closeCampaignEvents(true);state.eventReconnect=setTimeout(()=>{if(state.eventCampaignId===cid)connectCampaignEvents(cid);},3000);};}catch{}}
 
-function resetCampaignUi(){state.bulkSend={active:false,total:0,sent:0,failed:0,currentRow:null,nextDelayMs:0,message:''};state.campaign=null;state.campaignSig='';state.expanded=null;state.selectedRows.clear();state.previews.clear();state.verification.clear();closeVerificationPopup();runConsole.classList.add('hidden');runSummary.classList.add('hidden');queueRowsEl.innerHTML='';if(sendAllMeta)sendAllMeta.textContent='';if(sendAllBtn)sendAllBtn.disabled=true;if(sendAllCountInput)sendAllCountInput.disabled=true;if(queueSelectAllBtn)queueSelectAllBtn.disabled=true;if(queueDeleteSelectedBtn)queueDeleteSelectedBtn.disabled=true;if(queueSelectedMeta)queueSelectedMeta.textContent='';stopPolling();closeCampaignEvents();clearStoreId();}
+function resetCampaignUi(){state.bulkSend={active:false,total:0,sent:0,failed:0,currentRow:null,nextDelayMs:0,message:'',stopRequested:false};state.campaign=null;state.campaignSig='';state.expanded=null;state.selectedRows.clear();state.selectionAnchorRow=null;state.previews.clear();state.verification.clear();state.mailSenders.bulkUsageByDomain={};closeVerificationPopup();runConsole.classList.add('hidden');runSummary.classList.add('hidden');queueRowsEl.innerHTML='';if(sendAllMeta)sendAllMeta.textContent='';if(sendAllBtn)sendAllBtn.disabled=true;if(sendAllCountInput)sendAllCountInput.disabled=true;if(sendBulk30Btn)sendBulk30Btn.disabled=true;if(senderMeta)senderMeta.textContent='';if(queueSelectAllBtn)queueSelectAllBtn.disabled=true;if(queueDeleteSelectedBtn)queueDeleteSelectedBtn.disabled=true;if(queueSelectedMeta)queueSelectedMeta.textContent='';stopPolling();closeCampaignEvents();clearStoreId();}
 async function fileToBase64(file){return await new Promise((res,rej)=>{const r=new FileReader();r.onload=()=>{const v=String(r.result||'');const c=v.indexOf(',');res(c>=0?v.slice(c+1):v);};r.onerror=()=>rej(new Error('Unable to read selected file'));r.readAsDataURL(file);});}
 function setFile(file){state.file=file||null;startRunBtn.disabled=!state.file;if(!state.file){uploadStateText.textContent='No file selected';return;}uploadStateText.textContent=`Loaded: ${state.file.name} (${(state.file.size/(1024*1024)).toFixed(2)} MB)`;}
 
@@ -153,17 +173,31 @@ function pClear(n){state.previews.delete(Number(n));}
 
 async function rowGenerate(row,{silent=false}={}){if(!state.campaign)return false;const campaignStatus=String(state.campaign.status||'').toLowerCase();if(campaignStatus==='stopped'){if(!silent){setMainStatus('error','CAMPAIGN STOPPED');rawOutput.textContent=j({error:'Campaign is stopped. Resume or restart before generating preview.'});}return false;}const cid=state.campaign.id;const rn=Number(row.rowNumber);pSet(rn,{phase:'generating',message:'Generating preview...'});renderCampaign();try{const prev=await api('/api/campaigns/send-preview',{campaignId:cid,rowNumber:rn,websiteUrl:row.websiteUrl,jinaContent:row.jinaContent||row.sourceRow?.jina_content||'',sourceRow:row.sourceRow||{},contactEmail:row.contactEmail||row.sourceRow?.email||row.sourceRow?.Email||undefined,draftIterations:getDraftIterations()});if(prev?.mailerFields)fill(prev.mailerFields);pSet(rn,{phase:'ready',message:'Preview ready',preview:prev,editingBody:false,to:prev.to,subject:prev.subject,body:prev.body});sendPreviewCard.classList.remove('muted');sendPreviewCard.textContent=`To: ${prev.to}\nSubject: ${prev.subject}\n\n${prev.body}`;try{const fresh=await api(`/api/campaigns/${encodeURIComponent(cid)}`,null,'GET');if(fresh?.campaign&&setCampaign(fresh.campaign)){renderCampaign();}}catch{}if(!silent)setMainStatus('success','PREVIEW READY');return true;}catch(e){pSet(rn,{phase:'error',message:e.message||'Failed to generate preview'});renderCampaign();if(!silent)setMainStatus('error','PREVIEW FAILED');return false;}}
 
-async function rowSend(rn,{silent=false}={}){const rowNumber=Number(rn);if(!Number.isFinite(rowNumber)||rowNumber<1||!state.campaign)return false;let st=ensurePreviewStateForRow(rowNumber);if(!st?.preview){if(!silent){setMainStatus('error','SEND FAILED');rawOutput.textContent=j({error:'Preview data is missing for this row. Generate preview first.'});}return false;}const cid=state.campaign.id;pSet(rowNumber,{phase:'sending',message:'Sending email...'});renderCampaign();try{const out=await api('/api/campaigns/send',{campaignId:cid,rowNumber:rowNumber,to:String(st.to||'').trim(),subject:String(st.subject||'').trim(),body:String(st.body||'').trim(),mailerFields:st.preview.mailerFields||{}});pSet(rowNumber,{phase:'sent',message:`Email sent to ${out.to}. Message ID: ${out.messageId||'-'}`,preview:st.preview,statusOverride:'sent'});try{const fresh=await api(`/api/campaigns/${encodeURIComponent(cid)}`,null,'GET');if(fresh?.campaign&&setCampaign(fresh.campaign)){renderCampaign();}}catch{}if(!silent)setMainStatus('success','EMAIL SENT');return true;}catch(e){pSet(rowNumber,{phase:'ready',message:`Send failed: ${e.message||'Send failed'}`,preview:st.preview,editingBody:st.editingBody,to:st.to,subject:st.subject,body:st.body,statusOverride:''});renderCampaign();if(!silent)setMainStatus('error','SEND FAILED');return false;}}
+async function rowSend(rn,{silent=false,countBulkUsage=false}={}){const rowNumber=Number(rn);if(!Number.isFinite(rowNumber)||rowNumber<1||!state.campaign)return false;let st=ensurePreviewStateForRow(rowNumber);if(!st?.preview){if(!silent){setMainStatus('error','SEND FAILED');rawOutput.textContent=j({error:'Preview data is missing for this row. Generate preview first.'});}return false;}const sender=selectedSender();if(!sender||!sender.email){if(!silent){setMainStatus('error','SENDER REQUIRED');rawOutput.textContent=j({error:'Select a sender before sending emails.'});}return false;}const cid=state.campaign.id;pSet(rowNumber,{phase:'sending',message:'Sending email...'});renderCampaign();try{const out=await api('/api/campaigns/send',{campaignId:cid,rowNumber:rowNumber,to:String(st.to||'').trim(),subject:String(st.subject||'').trim(),body:String(st.body||'').trim(),senderEmail:sender.email,senderName:sender.name||'',enforceDomainBulkLimit:countBulkUsage===true,mailerFields:st.preview.mailerFields||{}});const sentSenderEmail=compact(out?.sender?.email)||sender.email;const sentSenderDomain=senderDomainFromEmail(sentSenderEmail);if(out?.domainUsage&&typeof out.domainUsage==='object'){const usage={};Object.entries(out.domainUsage).forEach(([domain,count])=>{const key=lower(domain);if(!key)return;usage[key]=Math.max(0,Number(count)||0);});state.mailSenders.bulkUsageByDomain=usage;}else if(countBulkUsage&&sentSenderDomain){incDomainUsage(sentSenderDomain,1);}renderSenderSelect();renderSenderMeta();pSet(rowNumber,{phase:'sent',message:`Email sent to ${out.to}. Message ID: ${out.messageId||'-'} | Sender: ${sentSenderEmail}`,preview:st.preview,statusOverride:'sent'});try{const fresh=await api(`/api/campaigns/${encodeURIComponent(cid)}`,null,'GET');if(fresh?.campaign&&setCampaign(fresh.campaign)){renderCampaign();}}catch{}if(!silent)setMainStatus('success','EMAIL SENT');return true;}catch(e){pSet(rowNumber,{phase:'ready',message:`Send failed: ${e.message||'Send failed'}`,preview:st.preview,editingBody:st.editingBody,to:st.to,subject:st.subject,body:st.body,statusOverride:''});renderCampaign();if(!silent)setMainStatus('error','SEND FAILED');return false;}}
 
-function getSendBatchSize(maxReady){const raw=Number.parseInt(String(sendAllCountInput?.value||''),10);if(!Number.isFinite(raw)||raw<1){if(sendAllCountInput)sendAllCountInput.value='1';return 1;}if(raw>maxReady){return maxReady;}return raw;}
+function getSendBatchSize(maxReady,maxAllowed=maxReady){const cappedMax=Math.max(0,Math.min(maxReady,maxAllowed));const raw=Number.parseInt(String(sendAllCountInput?.value||''),10);if(!Number.isFinite(raw)||raw<1){if(sendAllCountInput)sendAllCountInput.value='1';return cappedMax>0?1:0;}if(raw>cappedMax){return cappedMax;}return raw;}
 
-async function sendAllReadyRows(){if(!state.campaign?.id||state.bulkSend.active)return;const candidates=getSendReadyRows(state.campaign);if(candidates.length===0){setMainStatus('error','NO READY ROWS');if(sendAllMeta)sendAllMeta.textContent='No send-ready rows with preview data.';return;}const batchSize=getSendBatchSize(candidates.length);if(batchSize<1){setMainStatus('error','INVALID BATCH');if(sendAllMeta)sendAllMeta.textContent='Batch size must be at least 1.';return;}const batch=candidates.slice(0,batchSize);state.bulkSend={active:true,total:batch.length,sent:0,failed:0,currentRow:null,nextDelayMs:0,message:`Starting batch send (${batch.length})...`};renderCampaign();setMainStatus('loading','BULK SENDING');for(let i=0;i<batch.length;i++){const rn=Number(batch[i].rowNumber);state.bulkSend.currentRow=rn;state.bulkSend.message=`Sending row ${rn} (${i+1}/${state.bulkSend.total})`;renderCampaign();const ok=await rowSend(rn,{silent:true});if(ok){state.bulkSend.sent+=1;}else{state.bulkSend.failed+=1;}state.bulkSend.currentRow=null;if(i<batch.length-1){const delayMs=randomBulkDelayMs();state.bulkSend.nextDelayMs=delayMs;state.bulkSend.message=`Waiting ${Math.ceil(delayMs/1000)}s before next send`;renderCampaign();await wait(delayMs);}}state.bulkSend.active=false;state.bulkSend.currentRow=null;state.bulkSend.nextDelayMs=0;state.bulkSend.message=`Batch complete: ${state.bulkSend.sent} sent, ${state.bulkSend.failed} failed`;renderCampaign();if(state.bulkSend.failed>0){setMainStatus('error',`BULK DONE ${state.bulkSend.sent}/${state.bulkSend.total}`);}else{setMainStatus('success',`BULK SENT ${state.bulkSend.sent}`);}}
+async function sendAllReadyRows({forceThirtyLimit=false}={}){if(!state.campaign?.id||state.bulkSend.active)return;const sender=selectedSender();if(!sender||!sender.email){setMainStatus('error','SENDER REQUIRED');if(sendAllMeta)sendAllMeta.textContent='Select a sender before bulk send.';return;}const domain=sender.domain||senderDomainFromEmail(sender.email);const remaining=senderRemainingForBulk(sender);const candidates=getSendReadyRows(state.campaign);if(candidates.length===0){setMainStatus('error','NO READY ROWS');if(sendAllMeta)sendAllMeta.textContent='No send-ready rows with preview data.';return;}if(remaining<1){setMainStatus('error','DOMAIN LIMIT REACHED');if(sendAllMeta)sendAllMeta.textContent=`Bulk limit reached for ${domain}. Used ${BULK_DOMAIN_LIMIT}/${BULK_DOMAIN_LIMIT}.`;return;}const hardCap=forceThirtyLimit?Math.min(remaining,BULK_DOMAIN_LIMIT):remaining;const batchSize=forceThirtyLimit?Math.min(candidates.length,hardCap):getSendBatchSize(candidates.length,hardCap);if(batchSize<1){setMainStatus('error','INVALID BATCH');if(sendAllMeta)sendAllMeta.textContent='Batch size must be at least 1 and within domain limit.';return;}const batch=candidates.slice(0,batchSize);state.bulkSend={active:true,total:batch.length,sent:0,failed:0,currentRow:null,nextDelayMs:0,message:`Starting batch send (${batch.length}) via ${sender.email}...`,stopRequested:false};renderCampaign();setMainStatus('loading','BULK SENDING');for(let i=0;i<batch.length;i++){if(state.bulkSend.stopRequested){break;}const rn=Number(batch[i].rowNumber);state.bulkSend.currentRow=rn;state.bulkSend.message=`Sending row ${rn} (${i+1}/${state.bulkSend.total}) via ${sender.email}`;renderCampaign();const ok=await rowSend(rn,{silent:true,countBulkUsage:true});if(ok){state.bulkSend.sent+=1;}else{state.bulkSend.failed+=1;}state.bulkSend.currentRow=null;if(state.bulkSend.stopRequested){break;}if(i<batch.length-1){const delayMs=randomBulkDelayMs();state.bulkSend.nextDelayMs=delayMs;state.bulkSend.message=`Waiting ${Math.ceil(delayMs/1000)}s before next send`;renderCampaign();await wait(delayMs);}}state.bulkSend.active=false;state.bulkSend.currentRow=null;state.bulkSend.nextDelayMs=0;if(state.bulkSend.stopRequested){state.bulkSend.message=`Bulk send stopped (${sender.email}): ${state.bulkSend.sent} sent, ${state.bulkSend.failed} failed`;state.bulkSend.stopRequested=false;setMainStatus('error',`BULK STOPPED ${state.bulkSend.sent}/${state.bulkSend.total}`);}else{state.bulkSend.message=`Batch complete (${sender.email}): ${state.bulkSend.sent} sent, ${state.bulkSend.failed} failed`;if(state.bulkSend.failed>0){setMainStatus('error',`BULK DONE ${state.bulkSend.sent}/${state.bulkSend.total}`);}else{setMainStatus('success',`BULK SENT ${state.bulkSend.sent}`);}}renderCampaign();}
 async function retryRow(rn,mode='refetch_only'){if(!state.campaign?.id)return;try{const p=await api(`/api/campaigns/${encodeURIComponent(state.campaign.id)}/rows/${rn}/retry`,{mode});if(p?.campaign){setCampaign(p.campaign,{force:true});pClear(rn);renderCampaign();setMainStatus('success',mode==='refetch_and_preview'?'ROW REFETCH+PREVIEW':'ROW REFETCH STARTED');}}catch(e){setMainStatus('error','RETRY FAILED');rawOutput.textContent=j({error:e.message||'Retry failed'});}}
 
 function getSelectedRowNumbers(){return Array.from(state.selectedRows).map(v=>Number(v)).filter(v=>Number.isFinite(v)).sort((a,b)=>a-b);}
+function getQueueRowNumbers(campaign=state.campaign){
+const rows=Array.isArray(campaign?.rows)?campaign.rows:[];
+return rows.map(r=>Number(r?.rowNumber)).filter(n=>Number.isFinite(n));
+}
+function getRowSelectionRange(rowNumbers,startRow,endRow){
+if(!Array.isArray(rowNumbers)||rowNumbers.length<1)return [];
+const s=Number(startRow);
+const e=Number(endRow);
+const startIndex=rowNumbers.indexOf(s);
+const endIndex=rowNumbers.indexOf(e);
+if(startIndex<0||endIndex<0)return [e];
+const from=Math.min(startIndex,endIndex);
+const to=Math.max(startIndex,endIndex);
+return rowNumbers.slice(from,to+1);
+}
 function updateQueueSelectionControls(c){
-const rows=Array.isArray(c?.rows)?c.rows:[];
-const rowNumbers=rows.map(r=>Number(r?.rowNumber)).filter(n=>Number.isFinite(n));
+const rowNumbers=getQueueRowNumbers(c);
 const selectable=rowNumbers.length;
 const selectedCount=rowNumbers.filter(n=>state.selectedRows.has(n)).length;
 const campaignStatus=String(c?.status||'').toLowerCase();
@@ -180,10 +214,9 @@ queueDeleteSelectedBtn.textContent=selectedCount>0?`Delete Selected (${selectedC
 }
 
 function toggleSelectAllRows(){
-const rows=Array.isArray(state.campaign?.rows)?state.campaign.rows:[];
-const rowNumbers=rows.map(r=>Number(r?.rowNumber)).filter(n=>Number.isFinite(n));
+const rowNumbers=getQueueRowNumbers(state.campaign);
 const allSelected=rowNumbers.length>0&&rowNumbers.every(n=>state.selectedRows.has(n));
-if(allSelected){state.selectedRows.clear();}else{rowNumbers.forEach(n=>state.selectedRows.add(n));}
+if(allSelected){state.selectedRows.clear();state.selectionAnchorRow=null;}else{rowNumbers.forEach(n=>state.selectedRows.add(n));state.selectionAnchorRow=rowNumbers[0]??null;}
 renderCampaign();
 }
 
@@ -252,10 +285,23 @@ const selInput=document.createElement('input');
 selInput.type='checkbox';
 selInput.checked=state.selectedRows.has(rn);
 selInput.disabled=state.bulkSend.active;
-selInput.addEventListener('click',e=>e.stopPropagation());
-selInput.addEventListener('change',e=>{
+selInput.addEventListener('click',e=>{
 e.stopPropagation();
-if(e.target.checked)state.selectedRows.add(rn);else state.selectedRows.delete(rn);
+const rowNumbers=getQueueRowNumbers(c);
+const checked=Boolean(e.target.checked);
+const shiftHeld=Boolean(e.shiftKey);
+if(shiftHeld){
+const anchor=Number(state.selectionAnchorRow);
+const hasAnchor=rowNumbers.includes(anchor);
+const rangeStart=hasAnchor?anchor:(rowNumbers[0]??rn);
+const range=getRowSelectionRange(rowNumbers,rangeStart,rn);
+range.forEach(n=>{if(checked)state.selectedRows.add(n);else state.selectedRows.delete(n);});
+state.selectionAnchorRow=rn;
+renderCampaign();
+return;
+}
+if(checked)state.selectedRows.add(rn);else state.selectedRows.delete(rn);
+state.selectionAnchorRow=rn;
 updateQueueSelectionControls(c);
 });
 sel.appendChild(selInput);
@@ -305,12 +351,17 @@ function renderCampaign(){
 const c=state.campaign;
 if(!c){
 state.selectedRows.clear();
+state.selectionAnchorRow=null;
 runConsole.classList.add('hidden');
 runSummary.classList.add('hidden');
 queueRowsEl.innerHTML='';
 if(sendAllMeta)sendAllMeta.textContent='';
 if(sendAllBtn)sendAllBtn.disabled=true;
+if(sendBulk30Btn)sendBulk30Btn.disabled=true;
 if(sendAllCountInput)sendAllCountInput.disabled=true;
+if(senderSelect)senderSelect.disabled=true;
+if(refreshSendersBtn)refreshSendersBtn.disabled=state.mailSenders.loading;
+if(senderMeta)senderMeta.textContent='';
 if(queueSelectAllBtn)queueSelectAllBtn.disabled=true;
 if(queueDeleteSelectedBtn)queueDeleteSelectedBtn.disabled=true;
 if(queueSelectedMeta)queueSelectedMeta.textContent='';
@@ -320,6 +371,7 @@ return;
 const rows=Array.isArray(c?.rows)?c.rows:[];
 const validRowNumbers=new Set(rows.map(item=>Number(item?.rowNumber)).filter(n=>Number.isFinite(n)));
 for(const selected of Array.from(state.selectedRows)){if(!validRowNumbers.has(Number(selected)))state.selectedRows.delete(Number(selected));}
+if(!validRowNumbers.has(Number(state.selectionAnchorRow)))state.selectionAnchorRow=null;
 for(const [rowNumber]of state.verification.entries()){
 const row=rows.find(item=>Number(item?.rowNumber)===Number(rowNumber));
 if(!row||String(row.status||'').toLowerCase()!=='awaiting_verification'){state.verification.delete(rowNumber);}
@@ -340,13 +392,20 @@ runMetaText.textContent=`Started ${ago(c.startedAt||c.savedAt)} | ${s.failed} fa
 const st=statusNorm(c.status);
 pauseResumeBtn.disabled=['completed','failed'].includes(st)||state.bulkSend.active;
 pauseResumeBtn.textContent=st==='running'?'Pause':'Resume';
-stopRunBtn.disabled=['completed','stopped','failed'].includes(st)||state.bulkSend.active;
+stopRunBtn.disabled=['completed','stopped','failed'].includes(st);
  if(resetRunBtn)resetRunBtn.disabled=state.bulkSend.active;
 const readyRows=getSendReadyRows(c);
-const batchSize=getSendBatchSize(Math.max(readyRows.length,1));
-if(sendAllCountInput){sendAllCountInput.disabled=state.bulkSend.active||readyRows.length===0;sendAllCountInput.max=String(Math.max(readyRows.length,1));}
-if(sendAllBtn){sendAllBtn.disabled=state.bulkSend.active||readyRows.length===0;sendAllBtn.textContent=state.bulkSend.active?'Sending...':`Send Next ${Math.min(batchSize,readyRows.length)}${readyRows.length?` of ${readyRows.length}`:''}`;}
-if(sendAllMeta){if(state.bulkSend.active){const waitText=state.bulkSend.nextDelayMs>0?` | Next in ${Math.ceil(state.bulkSend.nextDelayMs/1000)}s`:'';sendAllMeta.textContent=`Sent ${state.bulkSend.sent}/${state.bulkSend.total}${waitText}`;}else if(state.bulkSend.message){sendAllMeta.textContent=state.bulkSend.message;}else{sendAllMeta.textContent=readyRows.length>0?`${readyRows.length} rows ready. Enter batch and click send.`:'No ready rows';}}
+const sender=selectedSender();
+const domainRemaining=sender?senderRemainingForBulk(sender):0;
+const effectiveReady=Math.min(readyRows.length,domainRemaining);
+const batchSize=getSendBatchSize(Math.max(readyRows.length,1),domainRemaining);
+if(senderSelect){senderSelect.disabled=state.bulkSend.active||state.mailSenders.loading||state.mailSenders.list.length<1;}
+if(refreshSendersBtn){refreshSendersBtn.disabled=state.bulkSend.active||state.mailSenders.loading;}
+if(sendAllCountInput){sendAllCountInput.disabled=state.bulkSend.active||effectiveReady===0;sendAllCountInput.max=String(Math.max(effectiveReady,1));}
+if(sendAllBtn){sendAllBtn.disabled=state.bulkSend.active||effectiveReady===0||!sender;sendAllBtn.textContent=state.bulkSend.active?'Sending...':`Send Next ${Math.min(batchSize,effectiveReady)}${effectiveReady?` of ${effectiveReady}`:''}`;}
+if(sendBulk30Btn){const bulk30Count=Math.min(effectiveReady,BULK_DOMAIN_LIMIT);sendBulk30Btn.disabled=state.bulkSend.active||bulk30Count<1||!sender;sendBulk30Btn.textContent=state.bulkSend.active?'Sending...':`Bulk Send ${bulk30Count}/30`;}
+if(sendAllMeta){if(state.bulkSend.active){const waitText=state.bulkSend.nextDelayMs>0?` | Next in ${Math.ceil(state.bulkSend.nextDelayMs/1000)}s`:'';sendAllMeta.textContent=`Sent ${state.bulkSend.sent}/${state.bulkSend.total}${waitText}`;}else if(state.bulkSend.message){sendAllMeta.textContent=state.bulkSend.message;}else if(!sender){sendAllMeta.textContent='Select a sender to send emails.';}else if(domainRemaining<1){sendAllMeta.textContent=`Domain limit reached (${BULK_DOMAIN_LIMIT}/${BULK_DOMAIN_LIMIT}).`; }else{sendAllMeta.textContent=readyRows.length>0?`${effectiveReady} rows ready for ${sender.email} (${domainRemaining} domain remaining).`:'No ready rows';}}
+renderSenderMeta();
 renderQueue(c);
 renderSummary(c,s);
 startPolling();
@@ -355,10 +414,10 @@ async function loadCampaign(id){if(!id)return;const p=await api(`/api/campaigns/
 async function loadLatest(){const persisted=getStoreId();if(persisted){try{await loadCampaign(persisted);return;}catch{clearStoreId();}}try{const p=await api('/api/campaigns/latest',null,'GET');if(p?.campaign?.id){setCampaign(p.campaign,{force:true});setStoreId(p.campaign.id);renderCampaign();}}catch{}}
 async function loadHistory(){historyList.innerHTML='<p class="muted">Loading history...</p>';try{const p=await api('/api/campaigns/history?limit=5',null,'GET');const arr=Array.isArray(p?.campaigns)?p.campaigns:[];historyList.innerHTML='';if(!arr.length){historyList.innerHTML='<p class="muted">No previous runs.</p>';return;}arr.forEach(c=>{const d=document.createElement('div');d.className='history-item';const t=document.createElement('p');const ts=Date.parse(String(c?.savedAt||''));t.textContent=`${c.id} | ${c.count||c.rows?.length||0} rows | ${c.succeeded||0} ok | ${Number.isFinite(ts)?new Date(ts).toLocaleString():'-'}`;const b=document.createElement('button');b.type='button';b.className='btn btn-ghost';b.textContent='Load';b.addEventListener('click',async()=>{await loadCampaign(c.id);setView('campaign');});d.append(t,b);historyList.appendChild(d);});}catch(e){historyList.innerHTML=`<p class="muted">${e.message||'Failed to load history.'}</p>`;}}
 
-async function startRun(){if(!state.file)return;const count=Number.parseInt(countInput.value,10);if(!Number.isFinite(count)||count<1){uploadStateText.textContent='Rows to process must be >= 1';return;}startRunBtn.disabled=true;startRunBtn.textContent='Initialising...';try{const base64=await fileToBase64(state.file);const p=await api('/api/campaigns',{campaignFile:{name:state.file.name,mimeType:state.file.type||'application/octet-stream',contentBase64:base64},count});if(!p?.campaign)throw new Error('Campaign creation failed');state.bulkSend={active:false,total:0,sent:0,failed:0,currentRow:null,nextDelayMs:0,message:''};setCampaign(p.campaign,{force:true});state.expanded=null;state.previews.clear();setStoreId(p.campaign.id);renderCampaign();await loadHistory();}catch(e){uploadStateText.textContent=e.message||'Run start failed';}finally{startRunBtn.textContent='Start Run';startRunBtn.disabled=!state.file;}}
+async function startRun(){if(!state.file)return;const count=Number.parseInt(countInput.value,10);if(!Number.isFinite(count)||count<1){uploadStateText.textContent='Rows to process must be >= 1';return;}startRunBtn.disabled=true;startRunBtn.textContent='Initialising...';try{const base64=await fileToBase64(state.file);const p=await api('/api/campaigns',{campaignFile:{name:state.file.name,mimeType:state.file.type||'application/octet-stream',contentBase64:base64},count});if(!p?.campaign)throw new Error('Campaign creation failed');state.bulkSend={active:false,total:0,sent:0,failed:0,currentRow:null,nextDelayMs:0,message:'',stopRequested:false};setCampaign(p.campaign,{force:true});state.expanded=null;state.previews.clear();setStoreId(p.campaign.id);renderCampaign();await loadHistory();}catch(e){uploadStateText.textContent=e.message||'Run start failed';}finally{startRunBtn.textContent='Start Run';startRunBtn.disabled=!state.file;}}
 async function togglePause(){if(!state.campaign?.id)return;const st=statusNorm(state.campaign.status);if(['completed','failed'].includes(st))return;const ep=st==='running'?'pause':'resume';pauseResumeBtn.disabled=true;try{const p=await api(`/api/campaigns/${encodeURIComponent(state.campaign.id)}/${ep}`,{});if(p?.campaign){setCampaign(p.campaign,{force:true});renderCampaign();}}catch(e){rawOutput.textContent=j({error:e.message||'Pause/resume failed'});}finally{pauseResumeBtn.disabled=false;}}
-async function stopRun(){if(!state.campaign?.id)return;stopRunBtn.disabled=true;try{const p=await api(`/api/campaigns/${encodeURIComponent(state.campaign.id)}/stop`,{});if(p?.campaign){setCampaign(p.campaign,{force:true});renderCampaign();}}catch(e){rawOutput.textContent=j({error:e.message||'Stop failed'});}finally{stopRunBtn.disabled=false;}}
-async function resetRun(){if(!state.campaign?.id)return;if(resetRunBtn)resetRunBtn.disabled=true;try{const p=await api(`/api/campaigns/${encodeURIComponent(state.campaign.id)}/reset`,{});if(p?.campaign){state.bulkSend={active:false,total:0,sent:0,failed:0,currentRow:null,nextDelayMs:0,message:''};setCampaign(p.campaign,{force:true});state.expanded=null;state.previews.clear();renderCampaign();setMainStatus('success','RUN RESET');}}catch(e){rawOutput.textContent=j({error:e.message||'Reset failed'});setMainStatus('error','RESET FAILED');}finally{if(resetRunBtn)resetRunBtn.disabled=false;}}
+async function stopRun(){if(!state.campaign?.id)return;state.bulkSend.stopRequested=true;stopRunBtn.disabled=true;try{const p=await api(`/api/campaigns/${encodeURIComponent(state.campaign.id)}/stop`,{});if(p?.campaign){setCampaign(p.campaign,{force:true});renderCampaign();}}catch(e){rawOutput.textContent=j({error:e.message||'Stop failed'});}finally{stopRunBtn.disabled=false;}}
+async function resetRun(){if(!state.campaign?.id)return;if(resetRunBtn)resetRunBtn.disabled=true;try{const p=await api(`/api/campaigns/${encodeURIComponent(state.campaign.id)}/reset`,{});if(p?.campaign){state.bulkSend={active:false,total:0,sent:0,failed:0,currentRow:null,nextDelayMs:0,message:'',stopRequested:false};setCampaign(p.campaign,{force:true});state.expanded=null;state.previews.clear();renderCampaign();setMainStatus('success','RUN RESET');}}catch(e){rawOutput.textContent=j({error:e.message||'Reset failed'});setMainStatus('error','RESET FAILED');}finally{if(resetRunBtn)resetRunBtn.disabled=false;}}
 
 function bindUpload(){uploadZone.addEventListener('click',()=>fileInput.click());uploadZone.addEventListener('keydown',e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();fileInput.click();}});fileInput.addEventListener('change',()=>setFile(fileInput.files?.[0]||null));['dragenter','dragover'].forEach(n=>uploadZone.addEventListener(n,e=>{e.preventDefault();uploadZone.classList.add('drag-over');}));['dragleave','drop'].forEach(n=>uploadZone.addEventListener(n,e=>{e.preventDefault();if(n==='drop'){const f=e.dataTransfer?.files?.[0];if(f)setFile(f);}uploadZone.classList.remove('drag-over');}));}
 function bindCopy(){document.querySelectorAll('.copy-btn[data-copy-target]').forEach(btn=>btn.addEventListener('click',async e=>{const id=e.currentTarget.dataset.copyTarget;const t=document.getElementById(id);const v=t?t.textContent||'':'';try{await navigator.clipboard.writeText(v);const p=btn.textContent;btn.textContent='Copied';setTimeout(()=>btn.textContent=p,900);}catch{btn.textContent='Failed';setTimeout(()=>btn.textContent='Copy',900);}}));}
@@ -378,10 +437,13 @@ startRunBtn.addEventListener('click',()=>startRun());
 pauseResumeBtn.addEventListener('click',()=>togglePause());
 stopRunBtn.addEventListener('click',()=>stopRun());
 if(sendAllBtn)sendAllBtn.addEventListener('click',()=>sendAllReadyRows());
+if(sendBulk30Btn)sendBulk30Btn.addEventListener('click',()=>sendAllReadyRows({forceThirtyLimit:true}));
 if(sendAllCountInput)sendAllCountInput.addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();sendAllReadyRows();}});
+if(senderSelect)senderSelect.addEventListener('change',e=>{const email=compact(e.target?.value);const sender=(Array.isArray(state.mailSenders.list)?state.mailSenders.list:[]).find(item=>lower(item.email)===lower(email));state.mailSenders.selectedEmail=sender?.email||email;state.mailSenders.selectedName=sender?.name||'';renderSenderSelect();renderSenderMeta();renderCampaign();});
+if(refreshSendersBtn)refreshSendersBtn.addEventListener('click',()=>loadMailSenders());
 if(queueSelectAllBtn)queueSelectAllBtn.addEventListener('click',()=>toggleSelectAllRows());
 if(queueDeleteSelectedBtn)queueDeleteSelectedBtn.addEventListener('click',()=>deleteSelectedRows());
 if(resetRunBtn)resetRunBtn.addEventListener('click',()=>resetRun());
 navBtns.forEach(b=>b.addEventListener('click',()=>setView(b.dataset.view)));
 
-bindUpload();bindCopy();setView('campaign');setMainStatus('idle','IDLE');setComplianceBadge(null);setDraftProgress(0,'Idle');refreshHealth(false);loadHistory();loadLatest();
+bindUpload();bindCopy();setView('campaign');setMainStatus('idle','IDLE');setComplianceBadge(null);setDraftProgress(0,'Idle');refreshHealth(false);loadMailSenders({silent:true});loadHistory();loadLatest();

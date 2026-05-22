@@ -353,9 +353,22 @@ function makeJinaReaderUrl(url) {
   return `https://r.jina.ai/${url}`;
 }
 
-async function fetchText(url, { fetchImpl = fetch, timeoutMs = DEFAULT_TIMEOUT_MS, headers = {} } = {}) {
+function normalizeAbortReason(reason, fallback = "Request aborted") {
+  const message = compact(reason?.message || reason);
+  return message || fallback;
+}
+
+async function fetchText(url, { fetchImpl = fetch, timeoutMs = DEFAULT_TIMEOUT_MS, headers = {}, abortSignal = null } = {}) {
+  if (abortSignal?.aborted) {
+    throw new Error(normalizeAbortReason(abortSignal.reason, "Campaign stop requested"));
+  }
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const timer = setTimeout(() => controller.abort(new Error(`Request timed out after ${timeoutMs}ms`)), timeoutMs);
+  let abortHandler = null;
+  if (abortSignal) {
+    abortHandler = () => controller.abort(abortSignal.reason || new Error("Campaign stop requested"));
+    abortSignal.addEventListener("abort", abortHandler, { once: true });
+  }
   try {
     const response = await fetchImpl(url, {
       method: "GET",
@@ -374,11 +387,17 @@ async function fetchText(url, { fetchImpl = fetch, timeoutMs = DEFAULT_TIMEOUT_M
     };
   } catch (error) {
     if (error?.name === "AbortError") {
+      if (abortSignal?.aborted) {
+        throw new Error(normalizeAbortReason(abortSignal.reason, "Campaign stop requested"));
+      }
       throw new Error(`Request timed out after ${timeoutMs}ms`);
     }
     throw error;
   } finally {
     clearTimeout(timer);
+    if (abortSignal && abortHandler) {
+      abortSignal.removeEventListener("abort", abortHandler);
+    }
   }
 }
 
@@ -387,6 +406,7 @@ async function fetchViaJina(url, options = {}) {
   const result = await fetchText(readerUrl, {
     fetchImpl: options.fetchImpl,
     timeoutMs: options.requestTimeoutMs,
+    abortSignal: options.abortSignal,
     headers: {
       Accept: "text/plain",
       "X-Return-Format": "text",
@@ -482,6 +502,7 @@ async function fetchViaGoogleCache(url, options = {}) {
   const result = await fetchText(readerUrl, {
     fetchImpl: options.fetchImpl,
     timeoutMs: options.requestTimeoutMs,
+    abortSignal: options.abortSignal,
   });
   if (!result.ok) {
     throw new Error(`Google cache returned ${result.status}`);
@@ -515,6 +536,7 @@ async function fetchWithChromeCookies(url, options = {}) {
   const result = await fetchText(url, {
     fetchImpl: options.fetchImpl,
     timeoutMs,
+    abortSignal: options.abortSignal,
     headers: {
       Cookie: safeCookieHeader,
       Accept:
@@ -652,6 +674,7 @@ async function fetchViaSearchSnippet(url, options = {}) {
     const result = await fetchText(readerUrl, {
       fetchImpl: options.fetchImpl,
       timeoutMs: options.requestTimeoutMs,
+      abortSignal: options.abortSignal,
       headers: {
         Accept: "text/plain",
         "X-Return-Format": "text",
@@ -881,6 +904,7 @@ function normalizeEnrichOptions(options = {}) {
     rowNumber: toInt(options.rowNumber, 0),
     rowIndex: toInt(options.rowIndex, 0),
     notifyUI: typeof options.notifyUI === "function" ? options.notifyUI : null,
+    abortSignal: options.abortSignal || null,
   };
 }
 

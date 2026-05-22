@@ -202,10 +202,15 @@
                 <button id="resetRunBtn" class="btn btn-ghost" type="button">Reset</button>
                 <div class="campaign-send-all">
                   <div class="campaign-send-controls">
+                    <label class="send-all-count-label" for="senderSelect">Sender</label>
+                    <select id="senderSelect"></select>
+                    <button id="refreshSendersBtn" class="btn btn-ghost" type="button">Refresh</button>
                     <label class="send-all-count-label" for="sendAllCountInput">Batch</label>
                     <input id="sendAllCountInput" type="number" min="1" step="1" value="10" />
-                    <button id="sendAllBtn" class="btn btn-primary" type="button">Send All Ready</button>
+                    <button id="sendAllBtn" class="btn btn-primary" type="button">Send Next Batch</button>
+                    <button id="sendBulk30Btn" class="btn btn-primary" type="button">Bulk Send 30/Domain</button>
                   </div>
+                  <span id="senderMeta" class="muted mono"></span>
                   <span id="sendAllMeta" class="muted mono"></span>
                 </div>
               </div>

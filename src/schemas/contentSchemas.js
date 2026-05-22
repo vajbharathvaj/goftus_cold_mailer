@@ -58,6 +58,9 @@ const campaignSendRequestSchema = z.object({
   to: z.string().trim().email(),
   subject: z.string().trim().min(1).max(500),
   body: z.string().trim().min(1).max(100000),
+  senderEmail: z.string().trim().email().optional(),
+  senderName: z.string().trim().max(200).optional(),
+  enforceDomainBulkLimit: z.coerce.boolean().optional().default(false),
   mailerFields: z.record(z.unknown()).optional(),
 });
 

@@ -54,6 +54,32 @@ function normalizeDraft(value) {
   );
 }
 
+function normalizeDraftPreserveLines(value) {
+  const lines = String(value || "")
+    .replace(/^["'`\s]+|["'`\s]+$/g, "")
+    .replace(/\[(.*?)\]\((.*?)\)/g, "$1")
+    .replace(/\r\n/g, "\n")
+    .split("\n")
+    .map((line) => line.replace(/^\s*[-*]\s+/, "").replace(/[ \t]+/g, " ").trim());
+
+  const normalized = [];
+  let previousBlank = false;
+  for (const line of lines) {
+    const isBlank = line.length < 1;
+    if (isBlank) {
+      if (!previousBlank) {
+        normalized.push("");
+      }
+      previousBlank = true;
+      continue;
+    }
+    normalized.push(line);
+    previousBlank = false;
+  }
+
+  return normalized.join("\n").trim();
+}
+
 function normalizeSubject(value) {
   return normalizeWhitespace(
     String(value || "")
@@ -247,6 +273,7 @@ function validateSubject(subject) {
 
 module.exports = {
   normalizeDraft,
+  normalizeDraftPreserveLines,
   normalizeSubject,
   validateDraft,
   validateSubject,

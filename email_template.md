@@ -1,19 +1,9 @@
-Hi [FirstName] —
-Hi [FirstName] — saw [Company] is [their business process].
-[Get that niche and give them with the hardest problem in the in dustry].
+Hi [FirstName] — saw [Company] is [their business process]. Most teams at that stage start running into [hardest industry bottleneck/problem].
 
-'We build lightweight automations and internal tools that remove those bottlenecks without adding more admin work.'[slap them with solution]
-I actually made a quick [AssetName] for [Company] — want me to send it over? Yes or no?
+We build lightweight automations and internal tools that remove that friction without adding more admin work. I also made a quick [AssetName] specifically for [Company].
 
-Hi Machiel,
+Want me to send it over? Just reply yes or no — I won’t follow up again.
 
-Hi Machiel — Hi Machiel — saw Bluebird is focused on SaaS recruitment. Scaling recruitment tech can be a real challenge, especially finding the right candidates quickly. We build lightweight automations and internal tools that remove those bottlenecks without adding more admin work. I actually made a quick demo of our lead generation platform showcasing automated candidate sourcing and matching capabilities for Bluebird — want me to send it over? Yes or no?
 
-Best regards,
-Bharatvaj
-Goftus Team
-Hi Machiel — saw Bluebird is focused on SaaS recruitment. Scaling recruitment tech can be tough, especially finding the right candidates quickly. We build lightweight automations and internal tools that remove those bottlenecks without adding more admin work. I actually made a quick demo of our lead generation platform showcasing automated candidate sourcing and matching capabilities for Bluebird — want me to send it over? Yes or no?
 
-Best regards,
-Bharatvaj
-Goftus Team
+
