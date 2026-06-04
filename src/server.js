@@ -31,6 +31,7 @@ const { MailerDocService } = require("./services/mailerDocService");
 const { verifyMailer, isMailerConfigured, sendEmail, listSenders } = require("./services/mailerSendService");
 const { CampaignSendService } = require("./services/campaignSendService");
 const { checkChromeCookieAvailability } = require("./services/chromeCookieService");
+const { readBlocklist, addToBlocklist, removeFromBlocklist } = require("./services/blocklistStorage");
 const { resumeVerification, skipVerification } = require("./services/verificationStateService");
 const warmupRoutes = require("./routes/warmup");
 const { checkReplies } = require("./warmup/replies");
@@ -608,6 +609,39 @@ app.get("/api/mail/senders", async (req, res) => {
     });
   } catch (error) {
     return res.status(502).json({ error: error.message });
+  }
+});
+
+app.get("/api/blocklist", async (_req, res) => {
+  try {
+    const blocklist = await readBlocklist();
+    return res.json({ ok: true, blocklist });
+  } catch (error) {
+    return res.status(500).json({ error: error.message });
+  }
+});
+
+app.post("/api/blocklist", async (req, res) => {
+  const email = String(req.body?.email || "").trim().toLowerCase();
+  const name = String(req.body?.name || "").trim();
+  if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    return res.status(400).json({ error: "A valid email address is required" });
+  }
+  try {
+    const blocklist = await addToBlocklist(email, name);
+    return res.json({ ok: true, blocklist });
+  } catch (error) {
+    return res.status(500).json({ error: error.message });
+  }
+});
+
+app.delete("/api/blocklist/:email", async (req, res) => {
+  const email = decodeURIComponent(req.params.email || "");
+  try {
+    const blocklist = await removeFromBlocklist(email);
+    return res.json({ ok: true, blocklist });
+  } catch (error) {
+    return res.status(500).json({ error: error.message });
   }
 });
 

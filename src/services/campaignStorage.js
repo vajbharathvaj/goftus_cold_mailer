@@ -3164,7 +3164,9 @@ class CampaignStorage {
 
     const status = String(metadata.status || "").toLowerCase();
     const hasActiveRun = this.activeRuns.has(normalizedCampaignId);
-    if (status === CAMPAIGN_STATUS_RUNNING || hasActiveRun || this.isRunStopRequested(normalizedCampaignId)) {
+    const isNonTerminal =
+      status === CAMPAIGN_STATUS_RUNNING || status === CAMPAIGN_STATUS_PAUSED;
+    if (isNonTerminal || hasActiveRun || this.isRunStopRequested(normalizedCampaignId)) {
       await this.stopCampaign(normalizedCampaignId);
       await this.waitForCampaignRunToStop(normalizedCampaignId, timeoutMs);
     }

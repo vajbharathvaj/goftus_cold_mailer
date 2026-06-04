@@ -65,6 +65,21 @@ function getLastUsedProfile(userDataDir) {
   }
 }
 
+function listChromeProfileDirectories(userDataDir) {
+  try {
+    if (!userDataDir || !fs.existsSync(userDataDir)) {
+      return [];
+    }
+    return fs
+      .readdirSync(userDataDir, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => compact(entry.name))
+      .filter((name) => name === "Default" || /^Profile \d+$/i.test(name));
+  } catch (_error) {
+    return [];
+  }
+}
+
 function isDefaultChromeUserDataDir(userDataDir) {
   const localAppData = compact(process.env.LOCALAPPDATA);
   if (!localAppData) {
@@ -299,14 +314,25 @@ function resolveChromeConfig(options = {}) {
   const profileFromOptions = compact(options.chromeProfileName);
   const autoDetectedProfile = getLastUsedProfile(userDataDir);
   const shouldAutoDetect = !explicitProfileFromEnv && (!profileFromOptions || profileFromOptions.toLowerCase() === "default");
-  const profileName = shouldAutoDetect
+  const requestedProfileName = shouldAutoDetect
     ? autoDetectedProfile || "Default"
     : profileFromOptions || explicitProfileFromEnv || autoDetectedProfile || "Default";
-  const profileDirPath = path.join(userDataDir, profileName);
-  if (!fs.existsSync(profileDirPath)) {
-    throw new Error(
-      `Chrome profile directory not found: ${profileDirPath}. Set CHROME_PROFILE_NAME to the correct profile folder (e.g. Default, Profile 1).`
+  const requestedProfileDirPath = path.join(userDataDir, requestedProfileName);
+  let profileName = requestedProfileName;
+  if (!fs.existsSync(requestedProfileDirPath)) {
+    const availableProfiles = listChromeProfileDirectories(userDataDir);
+    const fallbackProfile = [autoDetectedProfile, "Default", ...availableProfiles].find((candidate) =>
+      fs.existsSync(path.join(userDataDir, candidate))
     );
+    if (fallbackProfile) {
+      profileName = fallbackProfile;
+    } else {
+      throw new Error(
+        `Chrome profile directory not found: ${requestedProfileDirPath}. Available profiles: ${
+          availableProfiles.length ? availableProfiles.join(", ") : "none"
+        }. Set CHROME_PROFILE_NAME to a valid profile folder (e.g. Default, Profile 1).`
+      );
+    }
   }
 
   return {

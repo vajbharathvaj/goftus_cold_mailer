@@ -29,6 +29,10 @@
             <span class="nav-icon">[W]</span>
             <span>Warmup</span>
           </button>
+          <button class="nav-item" type="button" data-view="nomail">
+            <span class="nav-icon">[N]</span>
+            <span>No Mail</span>
+          </button>
         </nav>
 
         <div class="sidebar-status" aria-live="polite">
@@ -342,6 +346,49 @@
         </section>
       </section>
     </main>
+
+        <section id="noMailView" class="view">
+          <article class="panel nomail-header-panel">
+            <div class="nomail-header-row">
+              <div>
+                <p class="mono-label">Blocklist</p>
+                <h2 class="nomail-title">No Mail</h2>
+              </div>
+              <p class="nomail-subtitle muted">Emails added here will never be sent to — any matching campaign row shows <span class="nomail-badge-inline">DO NOT SEND</span>.</p>
+            </div>
+          </article>
+
+          <article class="panel nomail-add-panel">
+            <div class="panel-head">
+              <h2>Add to Blocklist</h2>
+            </div>
+            <div class="nomail-add-form">
+              <div class="nomail-input-group">
+                <label class="nomail-field-label" for="noMailEmailInput">Email address <span class="nomail-required">*</span></label>
+                <input id="noMailEmailInput" type="email" placeholder="contact@company.com" autocomplete="off" />
+              </div>
+              <div class="nomail-input-group">
+                <label class="nomail-field-label" for="noMailNameInput">Name <span class="nomail-optional">(optional)</span></label>
+                <input id="noMailNameInput" type="text" placeholder="Full name or company" autocomplete="off" />
+              </div>
+              <button id="noMailAddBtn" class="btn btn-danger-solid" type="button">Block Email</button>
+            </div>
+            <p id="noMailAddError" class="nomail-inline-error hidden"></p>
+          </article>
+
+          <article class="panel nomail-list-panel">
+            <div class="panel-head">
+              <h2 id="noMailListTitle">Blocked Emails <span id="noMailCount" class="nomail-count">0</span></h2>
+              <span id="noMailListMeta" class="muted mono"></span>
+            </div>
+            <div id="noMailList" class="nomail-list">
+              <div class="nomail-empty">
+                <p class="mono-label">No blocked emails</p>
+                <p class="muted">Emails you add will appear here. Campaign rows matching a blocked email will show <strong>Do Not Send</strong>.</p>
+              </div>
+            </div>
+          </article>
+        </section>
 
     <script src="/app.js"></script>
     <script src="/warmup.js"></script>
