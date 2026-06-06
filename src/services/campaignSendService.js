@@ -399,6 +399,7 @@ class CampaignSendService {
           lead: mailerFields,
           recipientName,
           template,
+          websiteContent: jinaContent,
           abortSignal,
         });
         templateDraftAccepted = isUsableTemplateDraft(draftResult);

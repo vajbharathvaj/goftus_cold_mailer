@@ -37,13 +37,14 @@ class ContentService {
     };
   }
 
-  async generateDraftFromTemplate({ lead, recipientName = "", template = "", abortSignal } = {}) {
+  async generateDraftFromTemplate({ lead, recipientName = "", template = "", websiteContent = "", abortSignal } = {}) {
     const raw = await this.ollamaClient.generate({
       system: buildSystemPrompt(),
       prompt: buildTemplateDraftPrompt({
         lead,
         recipientName,
         template,
+        websiteContent,
       }),
       options: { abortSignal },
     });

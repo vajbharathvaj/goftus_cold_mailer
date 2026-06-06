@@ -181,7 +181,8 @@ function buildVariantsPrompt(lead) {
   ].join("\n");
 }
 
-function buildTemplateDraftPrompt({ lead, recipientName = "", template = "" } = {}) {
+function buildTemplateDraftPrompt({ lead, recipientName = "", template = "", websiteContent = "" } = {}) {
+  const websiteSnippet = String(websiteContent || "").trim().slice(0, 3000);
   return [
     "You are writing one cold outreach email from a strict template.",
     "Replace every [ ... ] placeholder using the provided business context.",
@@ -191,10 +192,17 @@ function buildTemplateDraftPrompt({ lead, recipientName = "", template = "" } = 
     "Do not include square brackets in the final output.",
     "Do not include subject line, code fences, notes, or explanations.",
     "",
+    "PLACEHOLDER GUIDANCE:",
+    "- [specific observation pain point based on data]: Write ONE crisp sentence naming a real, concrete friction this company faces RIGHT NOW.",
+    "  Derive it from two sources: (1) what companies in this exact niche commonly struggle with operationally, and (2) specific evidence from the company context and website content below.",
+    "  It must feel like an insider observation — not a generic industry statement.",
+    "  Example format: 'manually tracking [X] across [Y]' or 'their [process] creates a bottleneck at [specific stage]'.",
+    "  Never use vague phrases like 'struggle with growth' or 'face challenges'.",
+    "",
     "Context:",
     `Recipient first name: ${compact(recipientName) || "there"}`,
     `Company: ${compact(lead?.companyName)}`,
-    `Industry: ${compact(lead?.industry)}`,
+    `Industry (niche): ${compact(lead?.industry)}`,
     `Target persona: ${compact(lead?.targetPersona)}`,
     `Company context: ${contextValue(lead)}`,
     `Operational area: ${operationalValue(lead)}`,
@@ -203,12 +211,13 @@ function buildTemplateDraftPrompt({ lead, recipientName = "", template = "" } = 
     `Primary outcome: ${proofPointValue(lead)}`,
     `Front-end deliverable: ${deliverableValue(lead)}`,
     `Objection to pre-handle: ${objectionValue(lead)}`,
+    websiteSnippet ? `\nWebsite content excerpt:\n${websiteSnippet}` : "",
     "",
     "Template:",
     String(template || "").trim(),
     "",
     "Return only the final filled email body.",
-  ].join("\n");
+  ].filter((line) => line !== "").join("\n");
 }
 
 module.exports = {
