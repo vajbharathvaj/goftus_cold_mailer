@@ -1689,9 +1689,10 @@ async function fetchViaRealChromeProfile(url, options = {}) {
       const candidateUrl = navigationCandidates[index];
       try {
         targetDocumentStatus = 0;
-        log(`navigation attempt target=${candidateUrl} waitUntil=load`);
-        await page.goto(candidateUrl, { waitUntil: "load", timeout: timeoutMs });
-        log(`navigation load completed currentUrl=${compact(page.url()) || "about:blank"}`);
+        const waitUntilMode = launchHeadless ? "domcontentloaded" : "load";
+        log(`navigation attempt target=${candidateUrl} waitUntil=${waitUntilMode}`);
+        await page.goto(candidateUrl, { waitUntil: waitUntilMode, timeout: timeoutMs });
+        log(`navigation completed currentUrl=${compact(page.url()) || "about:blank"}`);
         if (compact(page.url()).toLowerCase() === "about:blank") {
           log(`navigation remained about:blank for ${candidateUrl}, retrying waitUntil=domcontentloaded`);
           await page.goto(candidateUrl, { waitUntil: "domcontentloaded", timeout: timeoutMs });
@@ -1734,10 +1735,13 @@ async function fetchViaRealChromeProfile(url, options = {}) {
       }
     }
     log(`blank tab cleanup closed=${closedBlankTabs} remainingTabs=${context.pages().length}`);
-    await page.waitForLoadState("networkidle", { timeout: Math.min(timeoutMs, 12000) }).catch(() => {});
-    await page.waitForTimeout(1200);
+    if (!launchHeadless) {
+      // networkidle waits for all trackers/analytics to go quiet — skip in headless (saves 0–12s).
+      await page.waitForLoadState("networkidle", { timeout: Math.min(timeoutMs, 12000) }).catch(() => {});
+    }
+    await page.waitForTimeout(launchHeadless ? 200 : 1200);
     assertNotAborted();
-    log("post-navigation wait complete (networkidle + settle delay)");
+    log(`post-navigation wait complete headless=${launchHeadless}`);
 
     await closeNonCookiePopups(page, log, "target page(before cookies)");
     log("cookie consent scan started");
@@ -1767,9 +1771,14 @@ async function fetchViaRealChromeProfile(url, options = {}) {
           .filter((href) => typeof href === "string" && href.startsWith(origin)),
       }), new URL(effectiveTargetUrl).origin);
 
-    log(`auto-scroll started steps=${SCROLL_STEPS} stepDelayMs=${SCROLL_STEP_DELAY_MS}`);
-    await autoScroll(page);
-    log("auto-scroll completed");
+    if (!launchHeadless) {
+      // Auto-scroll simulates human browsing — not needed in headless (saves 3.2s).
+      log(`auto-scroll started steps=${SCROLL_STEPS} stepDelayMs=${SCROLL_STEP_DELAY_MS}`);
+      await autoScroll(page);
+      log("auto-scroll completed");
+    } else {
+      log("auto-scroll skipped (headless mode)");
+    }
     let { rawText, links } = await extractPagePayload();
     log(`extract payload #1 textLen=${String(rawText || "").trim().length} links=${Array.isArray(links) ? links.length : 0}`);
     const protectionAfterExtract = await getProtectionSignals(page, {
@@ -1824,8 +1833,7 @@ async function fetchViaRealChromeProfile(url, options = {}) {
         let subPage = null;
         try {
           subPage = await context.newPage();
-          await subPage.goto(subUrl, { waitUntil: "load", timeout: timeoutMs });
-          await subPage.waitForLoadState("networkidle", { timeout: Math.min(timeoutMs, 8000) }).catch(() => {});
+          await subPage.goto(subUrl, { waitUntil: "domcontentloaded", timeout: timeoutMs });
           await handleCookieConsent(subPage);
           const subSnap = await buildPageTextSnapshot(subPage);
           if (subSnap.text.length > 100) {
