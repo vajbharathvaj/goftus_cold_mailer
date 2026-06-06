@@ -1,4 +1,4 @@
-const DISALLOWED_PHRASES = ["free", "guaranteed", "limited time", "act now", "click here"];
+const DISALLOWED_PHRASES = ["free", "guaranteed", "limited time", "act now", "click here", "—"];
 const SUBJECT_SALES_TERMS = [
   "proposal",
   "demo",
@@ -49,7 +49,7 @@ function proofPointValue(lead) {
 }
 
 function buildSystemPrompt() {
-  return "Write concise B2B cold emails. Plain text only. Follow the required format exactly. Avoid hype, sales language, filler, and polished marketing language. Keep the tone natural, human, and simple.";
+  return "Write concise B2B cold emails. Plain text only. Follow the required format exactly. Avoid hype, sales language, filler, and polished marketing language. Keep the tone natural, human, and simple. Never use em dashes (—) anywhere in the output.";
 }
 
 function buildDraftPrompt(lead) {

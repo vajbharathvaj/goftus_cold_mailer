@@ -8,7 +8,7 @@ Here's the honest picture:
 
 Best case: This becomes the decision that 10x's your ops.
 
-Worst case: You get a valuable demo that costs nothing — and a team working alongside you, for free, until you do. No retainer. Just results first.
+Worst case: You get a valuable demo that costs nothing, and a team working alongside you, for free, until you do. No retainer. Just results first.
 
 Either way, you win. Only for a limited number of companies.
 
