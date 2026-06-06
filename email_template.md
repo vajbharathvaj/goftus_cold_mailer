@@ -1,22 +1,15 @@
 Hi [FirstName],
 
-Noticed [Company] is [specific observation pain point based on data]. That one task alone is probably costing your team [X days] per order.
+Noticed [Company] is [specific observation pain point based on data]. That one task alone is probably costing your team [X days] per cycle.
 
-I built a [AssetName] specifically for [Company] that shows exactly where the friction is and how automating it makes the scaling much better.
+I built a [AssetName] specifically for [Company] that shows exactly where the friction is and how automating it changes the trajectory.
 
 Here's the honest picture:
 
-Best case senario :This has to be the decision that 10x's your ops.
+Best case: This becomes the decision that 10x's your ops.
 
-Worst case senario: you get a valuable demo that costs nothing  and, a team working alongside you, for free, until you do get that. (if agreed) Just results first.
+Worst case: You get a valuable demo that costs nothing — and a team working alongside you, for free, until you do. No retainer. Just results first.
 
-Either way, you win. Only for limited companies.
+Either way, you win. Only for a limited number of companies.
 
-Want me to send it over? If not, a quick "No" will save me further research on  [Company].
-
-
-
-
-
-
-
+Want me to send it over? If not, a quick "No" saves us both the time.
