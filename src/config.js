@@ -112,7 +112,7 @@ module.exports = {
   subPageMaxCount: getInt(process.env.SUBPAGE_MAX_COUNT, 2),
   searchSnippetEnabled: getBool(process.env.SEARCH_SNIPPET_ENABLED, true),
   searchSnippetMaxLines: getInt(process.env.SEARCH_SNIPPET_MAX_LINES, 3),
-  rowConcurrency: Math.max(1, getInt(process.env.ROW_CONCURRENCY, 1)),
+  rowConcurrency: Math.max(1, getInt(process.env.ROW_CONCURRENCY, 3)),
   generationConcurrency: Math.max(1, getInt(process.env.GENERATION_CONCURRENCY, 1)),
   profileSearchOnly: getBool(process.env.PROFILE_SEARCH_ONLY, false),
   continueOnWebsiteFetchFailure: getBool(process.env.CONTINUE_ON_WEBSITE_FETCH_FAILURE, true),

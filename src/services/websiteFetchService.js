@@ -718,17 +718,21 @@ async function fetchWebsiteContent(url, options = {}) {
   const layerTrace = [];
   const fetchMethod = options.profileSearchOnly ? "chrome_profile_search_test" : "chrome_profile";
   const profileSearchOnly = options.profileSearchOnly === true;
-  const initialHeadless = toBool(options.chromeHeadless, false);
-  const enableHeadfulFallback = initialHeadless && toBool(options.chromeHeadlessFallback, true);
-  const headlessAttempts = enableHeadfulFallback ? [true, false] : [initialHeadless];
+  // Always try headless first (fast, no visible window); fall back to headful if blocked.
+  // profileSearchOnly needs a real visible window so skip headless for that mode.
+  const headlessAttempts = profileSearchOnly ? [false] : [true, false];
+  const baseTimeoutMs = toInt(options.chromeTimeoutMs, 30000);
 
   let lastError = null;
   for (const attemptHeadless of headlessAttempts) {
+    // Give headless a shorter deadline — if the site blocks it, fail fast and let headful retry.
+    const attemptTimeoutMs = attemptHeadless ? Math.max(10000, Math.floor(baseTimeoutMs * 0.5)) : baseTimeoutMs;
     try {
       const result = await fetchViaRealChromeProfile(targetUrl, {
         ...options,
         profileSearchOnly,
         chromeHeadless: attemptHeadless,
+        chromeTimeoutMs: attemptTimeoutMs,
       });
       layerTrace.push(`[ok] ${fetchMethod} succeeded headless=${attemptHeadless}`);
       return {
@@ -939,14 +943,8 @@ async function enrichWebsiteContent(websiteUrl, options = {}) {
     };
   }
 
-  let subPages = [];
-  if (!runtimeOptions.profileSearchOnly) {
-    try {
-      subPages = await fetchSubPages(homepageResult.text, normalizedUrl, homepageResult.links || [], runtimeOptions);
-    } catch (_error) {
-      subPages = [];
-    }
-  }
+  // Subpages are collected inside the Chrome session (same browser, no extra launches).
+  const subPages = Array.isArray(homepageResult.subPages) ? homepageResult.subPages : [];
 
   const combined = combinePageContent(homepageResult.text, subPages);
   return {

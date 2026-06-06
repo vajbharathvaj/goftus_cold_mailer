@@ -1806,9 +1806,44 @@ async function fetchViaRealChromeProfile(url, options = {}) {
     const cleanedText = cleanText(rawText);
     log(`success cleanedTextLen=${cleanedText.length} source=chrome_profile`);
 
+    // Collect subpages in the same browser session — zero extra Chrome launches.
+    const inlineSubPages = [];
+    const subPageMaxCount = Math.max(0, Number.parseInt(options.subPageMaxCount, 10) || 0);
+    if (subPageMaxCount > 0 && cleanedLinks.length > 0) {
+      const USEFUL_SUB_PATTERNS = [
+        /\/about/i, /\/company/i, /\/who-we-are/i, /\/our-story/i,
+        /\/services/i, /\/what-we-do/i, /\/solutions/i, /\/team/i,
+        /\/mission/i, /\/vision/i, /\/product/i, /\/platform/i,
+      ];
+      const subPageCandidates = cleanedLinks
+        .filter((link) => USEFUL_SUB_PATTERNS.some((p) => p.test(link)))
+        .slice(0, subPageMaxCount);
+      log(`inline-subpages candidates=${subPageCandidates.length} max=${subPageMaxCount}`);
+      for (const subUrl of subPageCandidates) {
+        assertNotAborted();
+        let subPage = null;
+        try {
+          subPage = await context.newPage();
+          await subPage.goto(subUrl, { waitUntil: "load", timeout: timeoutMs });
+          await subPage.waitForLoadState("networkidle", { timeout: Math.min(timeoutMs, 8000) }).catch(() => {});
+          await handleCookieConsent(subPage);
+          const subSnap = await buildPageTextSnapshot(subPage);
+          if (subSnap.text.length > 100) {
+            inlineSubPages.push({ url: subUrl, text: subSnap.text, source: "chrome_profile" });
+            log(`inline-subpages fetched url=${subUrl} textLen=${subSnap.text.length}`);
+          }
+        } catch (subError) {
+          log(`inline-subpages failed url=${subUrl} err=${subError?.message || "unknown"}`);
+        } finally {
+          await subPage?.close().catch(() => {});
+        }
+      }
+    }
+
     return {
       text: cleanedText,
       links: cleanedLinks,
+      subPages: inlineSubPages,
       source: "chrome_profile",
     };
   } finally {
