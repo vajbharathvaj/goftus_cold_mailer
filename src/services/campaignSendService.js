@@ -281,6 +281,12 @@ function fillTemplateFallback(template, { recipientName = "", mailerFields = {} 
     if (token.includes("assetname")) {
       return assetName;
     }
+    if (token.includes("observation") || token.includes("pain point") || token.includes("pain")) {
+      return firstNonEmpty(hardProblem, process, "handling manual processes with no automation layer");
+    }
+    if (token.includes("days") || token.includes("hours") || token.includes("time")) {
+      return firstNonEmpty(mailerFields.timeOrEffortConstraint, "several hours per week");
+    }
     return firstNonEmpty(hardProblem, process, company);
   });
 
@@ -378,15 +384,22 @@ class CampaignSendService {
     const recipientEmail = resolveRecipientEmail(contactEmail, sourceRow);
 
     const reusableMailerFields = resolveMailerFieldsFromSourceRow(sourceRow, websiteUrl);
-    const mailerFields = hasReusableMailerFields(reusableMailerFields)
-      ? reusableMailerFields
-      : await this.mailerDocService.buildMailerFieldsForCampaignRow({
+    let mailerFields;
+    if (hasReusableMailerFields(reusableMailerFields)) {
+      mailerFields = reusableMailerFields;
+    } else {
+      try {
+        mailerFields = await this.mailerDocService.buildMailerFieldsForCampaignRow({
           rowNumber,
           websiteUrl,
           jinaContent,
           sourceRow,
           abortSignal,
         });
+      } catch (_error) {
+        mailerFields = reusableMailerFields;
+      }
+    }
     const recipientName = resolveRecipientName(sourceRow, recipientEmail);
     let draftResult = null;
     let finalSubjectResult = null;
@@ -455,7 +468,11 @@ class CampaignSendService {
 
     if (!templateDraftAccepted && !isUsableDraft(draftResult)) {
       for (let attempt = 0; attempt < draftIterations; attempt += 1) {
-        draftResult = await this.contentService.generateDraft(mailerFields, { abortSignal });
+        try {
+          draftResult = await this.contentService.generateDraft(mailerFields, { abortSignal });
+        } catch (_error) {
+          // Fall through to retry or fallback draft below.
+        }
       }
       if (!isUsableDraft(draftResult)) {
         try {
@@ -475,8 +492,13 @@ class CampaignSendService {
     }
 
     if (!isUsableSubject(finalSubjectResult)) {
-      const subjectResult = await this.contentService.generateSubject(mailerFields, draftResult.draft, { abortSignal });
-      finalSubjectResult = subjectResult;
+      let subjectResult = null;
+      try {
+        subjectResult = await this.contentService.generateSubject(mailerFields, draftResult.draft, { abortSignal });
+        finalSubjectResult = subjectResult;
+      } catch (_error) {
+        // Fall through to fallback subject.
+      }
       if (!isUsableSubject(finalSubjectResult)) {
         const fallbackSubject = buildFallbackSubject(mailerFields);
         finalSubjectResult = {
