@@ -12,6 +12,8 @@ const {
   campaignDeleteRowsRequestSchema,
 } = require("./schemas/contentSchemas");
 const { OllamaClient } = require("./services/ollamaClient");
+const { OpenAIClient } = require("./services/openaiClient");
+const { CascadeClient } = require("./services/cascadeClient");
 const { ContentService } = require("./services/contentService");
 const {
   CampaignStorage,
@@ -30,7 +32,10 @@ const {
 const { MailerDocService } = require("./services/mailerDocService");
 const { verifyMailer, isMailerConfigured, sendEmail, listSenders } = require("./services/mailerSendService");
 const { CampaignSendService } = require("./services/campaignSendService");
+const reviewFetchService = require("./services/reviewFetchService");
+const ruleEngine = require("./services/ruleEngine");
 const { checkChromeCookieAvailability } = require("./services/chromeCookieService");
+const { SharedBrowserSession } = require("./services/sharedBrowserSession");
 const { readBlocklist, addToBlocklist, removeFromBlocklist } = require("./services/blocklistStorage");
 const { resumeVerification, skipVerification } = require("./services/verificationStateService");
 const warmupRoutes = require("./routes/warmup");
@@ -83,6 +88,47 @@ function notifyCampaignUI(campaignId, event) {
     campaignSseClients.delete(key);
   }
 }
+
+function broadcastAllCampaignSse(event) {
+  const payload = `data: ${JSON.stringify(event || {})}\n\n`;
+  for (const [campaignId, clients] of campaignSseClients.entries()) {
+    for (const client of clients) {
+      try { client.write(payload); } catch (_) { clients.delete(client); }
+    }
+    if (clients.size === 0) campaignSseClients.delete(campaignId);
+  }
+}
+
+function buildCascadeClient() {
+  const tiers = [];
+  const primaryKey = process.env.OPENAI_API_KEY;
+  const primaryModel = process.env.OPENAI_PRIMARY_MODEL || "gpt-4o-mini";
+  if (primaryKey) {
+    tiers.push({
+      name: "primary",
+      label: `GPT ${primaryModel}`,
+      model: primaryModel,
+      client: new OpenAIClient({ apiKey: primaryKey, model: primaryModel, timeoutMs: 90000 }),
+      costPer1kTokens: 0.00015,
+    });
+  }
+  const ossModel = process.env.OPENAI_OSS_MODEL;
+  const ossKey = process.env.OPENAI_OSS_API_KEY || primaryKey;
+  const ossBaseUrl = process.env.OPENAI_OSS_BASE_URL;
+  if (ossModel && ossKey) {
+    tiers.push({
+      name: "secondary",
+      label: `OSS ${ossModel}`,
+      model: ossModel,
+      client: new OpenAIClient({ apiKey: ossKey, model: ossModel, baseUrl: ossBaseUrl, timeoutMs: 120000 }),
+      costPer1kTokens: 0.0001,
+    });
+  }
+  tiers.push({ name: "table", label: "Table Engine", model: "", client: null, costPer1kTokens: 0 });
+  return new CascadeClient({ tiers });
+}
+
+const cascadeClient = buildCascadeClient();
 
 function compact(value) {
   return String(value || "").trim();
@@ -344,7 +390,20 @@ const mailerOllamaClient = new OllamaClient({
   keepAlive: config.ollamaMailerKeepAlive || config.ollamaKeepAlive,
 });
 
-const contentService = new ContentService({ ollamaClient });
+const hasCloudGeneration = Boolean(process.env.OPENAI_API_KEY || process.env.OPENAI_OSS_API_KEY);
+const contentGenerationClient = hasCloudGeneration ? cascadeClient : ollamaClient;
+const mailerGenerationClient = hasCloudGeneration ? cascadeClient : mailerOllamaClient;
+
+// Shared Chrome session: one persistent browser context reused across all rows in a run.
+// Only enabled when using cloud models (OpenAI); Ollama mode keeps per-row Chrome instances.
+const sharedBrowserSession = hasCloudGeneration ? new SharedBrowserSession() : null;
+
+cascadeClient.onTierChange((status) => {
+  console.log(`[cascade] tier changed to ${status.currentTier}`);
+  broadcastAllCampaignSse({ type: "model_tier_changed", ...status });
+});
+
+const contentService = new ContentService({ ollamaClient: contentGenerationClient });
 const campaignStorage = new CampaignStorage({
   requestTimeoutMs: config.requestTimeoutMs,
   proxyList: config.proxyList,
@@ -371,10 +430,15 @@ const campaignStorage = new CampaignStorage({
   continueOnWebsiteFetchFailure: config.continueOnWebsiteFetchFailure,
   pipelineStageTimeoutMs: config.pipelineStageTimeoutMs,
 });
-const mailerDocService = new MailerDocService({ ollamaClient: mailerOllamaClient });
+if (sharedBrowserSession) {
+  campaignStorage.setSharedBrowserSession(sharedBrowserSession);
+}
+const mailerDocService = new MailerDocService({ ollamaClient: mailerGenerationClient });
 const campaignSendService = new CampaignSendService({
   mailerDocService,
   contentService,
+  reviewFetchService,
+  ruleEngine,
   preferCombinedGeneration: config.previewUseCombinedGeneration,
 });
 const singleOllamaModelConfigured =
@@ -485,6 +549,20 @@ campaignStorage.setPipelineHandlers({
 
     await unloadModelInstances("run_start");
     await warmupModelInstances("run_start");
+
+    if (sharedBrowserSession && !sharedBrowserSession.isOpen()) {
+      await sharedBrowserSession.open({
+        chromeExecutablePath: config.chromeExecutablePath,
+        chromeUserDataDir: config.chromeUserDataDir,
+        chromeProfileName: config.chromeProfileName,
+        chromeAutomationUserDataDir: config.chromeAutomationUserDataDir,
+        chromeForceMirrorProfile: config.chromeForceMirrorProfile,
+        chromeHeadless: config.chromeHeadless,
+        chromeTimeoutMs: config.chromeTimeoutMs,
+      }).catch((error) => {
+        console.warn(`[shared-browser] failed to open session: ${error?.message || error}`);
+      });
+    }
   },
   onRunComplete: async ({ campaignId, status }) => {
     const normalizedCampaignId = String(campaignId || "").trim();
@@ -503,6 +581,12 @@ campaignStorage.setPipelineHandlers({
     }
 
     await unloadModelInstances("run_complete");
+
+    if (sharedBrowserSession?.isOpen()) {
+      await sharedBrowserSession.close().catch((error) => {
+        console.warn(`[shared-browser] failed to close session: ${error?.message || error}`);
+      });
+    }
   },
 });
 
@@ -576,6 +660,27 @@ async function assertCampaignRowCanGenerateMail(campaignId, rowNumber) {
     throw error;
   }
 }
+
+app.get("/api/model-tier", (_req, res) => {
+  return res.json({ ok: true, ...cascadeClient.getStatus() });
+});
+
+app.post("/api/model-tier", async (req, res) => {
+  const tierName = compact(req.body?.tier);
+  if (!tierName) {
+    return res.status(400).json({ error: "tier is required (primary | secondary | table)" });
+  }
+  const campaignId = compact(req.body?.campaignId);
+  try {
+    if (campaignId) {
+      await campaignStorage.stopCampaignAndWaitForIdle(campaignId, { timeoutMs: 30000 }).catch(() => {});
+    }
+    cascadeClient.switchToTier(tierName);
+    return res.json({ ok: true, stopped: Boolean(campaignId), ...cascadeClient.getStatus() });
+  } catch (error) {
+    return res.status(400).json({ error: error.message });
+  }
+});
 
 app.get("/health", (_req, res) => {
   res.json({

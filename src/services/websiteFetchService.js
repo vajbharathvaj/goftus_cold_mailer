@@ -718,6 +718,22 @@ async function fetchWebsiteContent(url, options = {}) {
   const layerTrace = [];
   const fetchMethod = options.profileSearchOnly ? "chrome_profile_search_test" : "chrome_profile";
   const profileSearchOnly = options.profileSearchOnly === true;
+
+  // When a shared browser session is active, reuse an existing tab instead of launching a new context.
+  if (options.sharedSession?.isOpen()) {
+    try {
+      const result = await options.sharedSession.fetchRow(targetUrl, options);
+      layerTrace.push(`[ok] ${fetchMethod} shared-session`);
+      return { ...result, fetchMethod, fetchTrace: layerTrace };
+    } catch (error) {
+      const message = error?.message || "Unknown error";
+      layerTrace.push(`[fail] ${fetchMethod} shared-session: ${message}`);
+      const err = new Error(`${fetchMethod} failed for ${targetUrl}: ${message}`);
+      err.layerTrace = layerTrace;
+      throw err;
+    }
+  }
+
   // Always try headless first (fast, no visible window); fall back to headful if blocked.
   // profileSearchOnly needs a real visible window so skip headless for that mode.
   const headlessAttempts = profileSearchOnly ? [false] : [true, false];
@@ -909,6 +925,7 @@ function normalizeEnrichOptions(options = {}) {
     rowIndex: toInt(options.rowIndex, 0),
     notifyUI: typeof options.notifyUI === "function" ? options.notifyUI : null,
     abortSignal: options.abortSignal || null,
+    sharedSession: options.sharedSession || null,
   };
 }
 

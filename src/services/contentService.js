@@ -14,6 +14,8 @@ const {
   normalizeSubject,
   parseStructuredEmailOutput,
   parseVariantsOutput,
+  buildSelfCritiquePrompt,
+  parseSelfCritiqueResponse,
 } = require("../utils/contentRules");
 
 const VARIANT_LABELS = ["A", "B", "C"];
@@ -37,23 +39,26 @@ class ContentService {
     };
   }
 
-  async generateDraftFromTemplate({ lead, recipientName = "", template = "", websiteContent = "", abortSignal } = {}) {
+  async generateDraftFromTemplate({ template = "", abortSignal } = {}) {
     const raw = await this.ollamaClient.generate({
       system: buildSystemPrompt(),
-      prompt: buildTemplateDraftPrompt({
-        lead,
-        recipientName,
-        template,
-        websiteContent,
-      }),
-      options: { abortSignal },
+      prompt: buildTemplateDraftPrompt({ template }),
+      options: { abortSignal, num_predict: 600 },
     });
 
     return {
       draft: normalizeDraftPreserveLines(raw),
-      compliance: validateDraft(raw),
       attempts: 1,
     };
+  }
+
+  async performSelfCritique(draft, { abortSignal } = {}) {
+    const raw = await this.ollamaClient.generate({
+      system: "Answer each question with only Y or N.",
+      prompt: buildSelfCritiquePrompt(draft),
+      options: { abortSignal, num_predict: 20 },
+    });
+    return parseSelfCritiqueResponse(raw);
   }
 
   async generateSubject(lead, draftBody = "", { abortSignal } = {}) {

@@ -181,50 +181,16 @@ function buildVariantsPrompt(lead) {
   ].join("\n");
 }
 
-function buildTemplateDraftPrompt({ lead, recipientName = "", template = "", websiteContent = "" } = {}) {
-  const websiteSnippet = String(websiteContent || "").trim().slice(0, 3000);
+function buildTemplateDraftPrompt({ template = "" } = {}) {
   return [
-    "You are writing one cold outreach email from a strict template.",
-    "Replace every [ ... ] placeholder using the provided business context.",
-    "If a placeholder contains an example or instruction, rewrite it naturally for this lead.",
-    "Keep the same line order and overall structure from the template.",
-    "Return plain text only.",
-    "Do not include square brackets in the final output.",
-    "Do not include subject line, code fences, notes, or explanations.",
+    "Lightly rephrase the following cold email to sound natural and human.",
+    "Do not change any names, companies, numbers, or factual details.",
+    "Keep every paragraph in the same order.",
+    "Plain text only. No brackets, no curly braces, no code fences, no explanations.",
+    "Return only the rephrased email. Do not add or remove any section.",
     "",
-    "Our services (always the solution): workflow automation, AI agents, RAG systems, business AI software, custom admin panels, custom internal tools, database organisation, cloud development.",
-    "",
-    "PLACEHOLDER GUIDANCE:",
-    "- [specific observation pain point based on data]: ONE crisp sentence naming a specific manual process or workflow gap solvable by software or AI.",
-    "  Derive from: (1) what this niche typically does manually that should be automated, (2) specific signals in their website/context.",
-    "  Format: 'manually [doing X] across [Y]' or 'handling [Z] with no automation layer'. Never vague phrases like 'struggle with growth'.",
-    "- [X days]: A realistic time cost tied directly to that pain — how much time/effort this process wastes per cycle.",
-    "  Be specific and credible for the niche. Examples: '3–4 hours per policy renewal', '2 days per client onboarding', '6 hours a week per agent'.",
-    "  Do NOT say 'X days' literally. Write a real number and unit.",
-    "- [AssetName ...]: A named demo PDF that shows how we'd solve their exact problem. 4-7 words, reads like a real document.",
-    "  Format: '[Problem/Company] [AI/Automation type] Demo'. Match the pain directly.",
-    "  Examples: 'United Insurance Carrier Workflow Automation Demo', 'Claims Processing AI Agent Demo', 'Policy Admin Panel Build Demo'.",
-    "  Do NOT use generic names like 'ROI breakdown' or 'two-minute audit'.",
-    "",
-    "Context:",
-    `Recipient first name: ${compact(recipientName) || "there"}`,
-    `Company: ${compact(lead?.companyName)}`,
-    `Industry (niche): ${compact(lead?.industry)}`,
-    `Target persona: ${compact(lead?.targetPersona)}`,
-    `Company context: ${contextValue(lead)}`,
-    `Operational area: ${operationalValue(lead)}`,
-    `Pain hypothesis: ${painTriggerValue(lead)}`,
-    `Service angle: ${serviceValue(lead)}`,
-    `Primary outcome: ${proofPointValue(lead)}`,
-    `Front-end deliverable: ${deliverableValue(lead)}`,
-    `Objection to pre-handle: ${objectionValue(lead)}`,
-    websiteSnippet ? `\nWebsite content excerpt:\n${websiteSnippet}` : "",
-    "",
-    "Template:",
     String(template || "").trim(),
-    "",
-    "Return only the final filled email body.",
-  ].filter((line) => line !== "").join("\n");
+  ].join("\n");
 }
 
 module.exports = {

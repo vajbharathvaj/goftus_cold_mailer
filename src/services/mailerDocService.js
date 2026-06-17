@@ -20,6 +20,14 @@ const MAILER_FIELD_ORDER = [
   "frontEndOfferDeliverable",
   "timeOrEffortConstraint",
   "objectionToPreHandle",
+  "topStrengthPhrase",
+  "secondaryStrength",
+  "differentiator",
+  "competitorFrame",
+  "customerType",
+  "prospectIsTechOrAutomation",
+  "servicesCount",
+  "sizeBucket",
 ];
 
 const MAILER_FIELD_LABELS = {
@@ -38,6 +46,14 @@ const MAILER_FIELD_LABELS = {
   frontEndOfferDeliverable: "Front-End Deliverable",
   timeOrEffortConstraint: "Time / Effort Constraint",
   objectionToPreHandle: "Objection",
+  topStrengthPhrase: "Top Strength Phrase",
+  secondaryStrength: "Secondary Strength",
+  differentiator: "Differentiator",
+  competitorFrame: "Competitor Frame",
+  customerType: "Customer Type",
+  prospectIsTechOrAutomation: "Is Tech / Automation Prospect",
+  servicesCount: "Services Count",
+  sizeBucket: "Size Bucket",
 };
 
 function compact(value) {
@@ -309,6 +325,14 @@ function buildPrompt({ rowNumber, websiteUrl, jinaContent, sourceRow }) {
     "- operationalArea: The exact business function where the pain lives (e.g. 'sales ops', 'client onboarding', 'procurement'). One short phrase.",
     "- companyDescription: 1-2 sentences — what they do, who they serve, how they work.",
     "- targetPersona: The role most responsible for this pain (e.g. 'Head of Operations', 'Founder', 'VP of Sales'). Be specific.",
+    "- topStrengthPhrase: ONE distilled outcome phrase, under 8 words, lowercase, no title case, no marketing slogans. e.g. 'building high-frequency trading algorithms at scale'.",
+    "- secondaryStrength: ONE named product or feature uniquely notable beyond their main strength, under 8 words, lowercase. e.g. 'FAST Parity Service for NYSE floor access'.",
+    "- differentiator: Their core competitive edge in 5-8 words, lowercase. e.g. 'deep proprietary algo infrastructure'.",
+    "- competitorFrame: The category of player they clearly outperform, lowercase. e.g. 'traditional brokers and legacy trading desks'.",
+    "- customerType: The category or platform type they serve or operate in, lowercase. e.g. 'fintech investment platforms'.",
+    "- prospectIsTechOrAutomation: true if the company IS a tech, SaaS, AI, automation, robotics, IT, dev-tools, or data-platform company. false otherwise. Return as boolean true or false.",
+    "- servicesCount: Integer count of distinct products or services the company offers based on their website. If unclear, return 1.",
+    "- sizeBucket: Estimate company size from website signals. Return exactly one of: 'small' (solo, <10 team, one location), 'mid' (10-200 team, multiple locations or products), 'large' (200+ or enterprise, global offices, complex org).",
     "",
     `Selected row: ${rowNumber}`,
     `Website URL: ${websiteUrl}`,

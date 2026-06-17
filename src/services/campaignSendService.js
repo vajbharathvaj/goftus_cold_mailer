@@ -9,6 +9,8 @@ const {
   normalizeSubject,
   validateDraft,
   validateSubject,
+  validatePhraseSlot,
+  validateFactTrace,
   OPT_OUT_LINE,
 } = require("../utils/contentRules");
 
@@ -309,7 +311,11 @@ function isUsableSubject(subjectResult) {
 }
 
 function hasUnresolvedTemplateToken(value) {
-  return /\[[^\]]+\]/.test(String(value || ""));
+  const text = String(value || "");
+  if (/\[[^\]]+\]/.test(text)) return true;
+  // Also catch unfilled {curly_brace} slots from the reward-style template
+  if (/\{[a-z][a-z0-9_\s]{1,40}\}/.test(text)) return true;
+  return false;
 }
 
 function isUsableTemplateDraft(draftResult) {
@@ -343,16 +349,45 @@ class CampaignSendService {
   constructor({
     mailerDocService,
     contentService,
+    reviewFetchService = null,
+    ruleEngine = null,
     sendEmailFn = sendEmail,
     preferCombinedGeneration = true,
     emailTemplatePath = DEFAULT_EMAIL_TEMPLATE_PATH,
   }) {
     this.mailerDocService = mailerDocService;
     this.contentService = contentService;
+    this.reviewFetchService = reviewFetchService;
+    this.ruleEngine = ruleEngine;
     this.sendEmailFn = typeof sendEmailFn === "function" ? sendEmailFn : sendEmail;
     this.preferCombinedGeneration = Boolean(preferCombinedGeneration);
     this.emailTemplatePath = compact(emailTemplatePath) || DEFAULT_EMAIL_TEMPLATE_PATH;
     this.emailTemplatePromise = null;
+  }
+
+  resolveTemplateSlots(template, { mailerFields = {}, engineResult = {}, recipientName = "", yourName = "Bharatvaj" } = {}) {
+    const blockageLine = engineResult.hedged
+      ? `the gap I'd guess at is ${compact(engineResult.blockage)}`
+      : compact(engineResult.blockage);
+
+    let resolved = String(template || "")
+      .replace(/\{firstName\}/g, compact(recipientName) || "there")
+      .replace(/\{companyName\}/g, compact(mailerFields.companyName))
+      .replace(/\{topStrengthPhrase\}/g, compact(mailerFields.topStrengthPhrase) || "what you have built")
+      .replace(/\{secondaryStrength\}/g, compact(mailerFields.secondaryStrength) || "one key capability")
+      .replace(/\{differentiator\}/g, compact(mailerFields.differentiator) || "your approach")
+      .replace(/\{competitorFrame\}/g, compact(mailerFields.competitorFrame) || "others in this space")
+      .replace(/\{customerType\}/g, compact(mailerFields.customerType) || "platforms like yours")
+      .replace(/\{blockage\}/g, blockageLine)
+      .replace(/\{benefit1\}/g, compact(engineResult.benefit1))
+      .replace(/\{benefit2\}/g, compact(engineResult.benefit2))
+      .replace(/\{yourName\}/g, compact(yourName) || "Bharatvaj");
+
+    if (engineResult.register === "enterprise") {
+      resolved = resolved.replace(/\nYou don't need help with the hard part\. This is just the next gear\.\n/g, "\n");
+    }
+
+    return resolved.trim();
   }
 
   async readEmailTemplate() {
@@ -377,117 +412,125 @@ class CampaignSendService {
   }) {
     const recipientEmail = resolveRecipientEmail(contactEmail, sourceRow);
 
+    // Step 1: Resolve mailer fields
     const reusableMailerFields = resolveMailerFieldsFromSourceRow(sourceRow, websiteUrl);
-    const mailerFields = hasReusableMailerFields(reusableMailerFields)
-      ? reusableMailerFields
-      : await this.mailerDocService.buildMailerFieldsForCampaignRow({
+    let tableOnlyMode = false;
+    let mailerFields;
+    if (hasReusableMailerFields(reusableMailerFields)) {
+      mailerFields = reusableMailerFields;
+    } else {
+      try {
+        mailerFields = await this.mailerDocService.buildMailerFieldsForCampaignRow({
           rowNumber,
           websiteUrl,
           jinaContent,
           sourceRow,
           abortSignal,
         });
+      } catch (error) {
+        if (error.isTableFallback) {
+          tableOnlyMode = true;
+          mailerFields = reusableMailerFields;
+        } else {
+          throw error;
+        }
+      }
+    }
     const recipientName = resolveRecipientName(sourceRow, recipientEmail);
-    let draftResult = null;
-    let finalSubjectResult = null;
-    let templateDraftAccepted = false;
-    const template = await this.readEmailTemplate();
 
-    if (template && typeof this.contentService.generateDraftFromTemplate === "function") {
+    // Step 2: Fetch reviews (best-effort)
+    let reviewResult = { reviewText: "", reviewThemesNegative: {}, reviewSignal: "none" };
+    if (this.reviewFetchService) {
       try {
-        draftResult = await this.contentService.generateDraftFromTemplate({
-          lead: mailerFields,
-          recipientName,
-          template,
-          websiteContent: jinaContent,
+        reviewResult = await this.reviewFetchService.fetchReviews(
+          mailerFields.companyName,
+          mailerFields.industry,
+          abortSignal
+        );
+      } catch (_error) {
+        // best-effort; continue without review signal
+      }
+    }
+
+    // Step 3: Run rule engine
+    let engineResult = { blockage: "", benefit1: "", benefit2: "", confidence: "LOW", register: "peer", layer: "fallback", hedged: false };
+    if (this.ruleEngine) {
+      const isTech = mailerFields.prospectIsTechOrAutomation === "true" || mailerFields.prospectIsTechOrAutomation === true;
+      engineResult = this.ruleEngine.run({
+        reviewThemesNegative: reviewResult.reviewThemesNegative || {},
+        reviewSignal: reviewResult.reviewSignal || "none",
+        industry: mailerFields.industry || "",
+        prospectIsTechOrAutomation: isTech,
+        servicesCount: parseInt(String(mailerFields.servicesCount || "1"), 10) || 1,
+        sizeBucket: mailerFields.sizeBucket || "mid",
+        jinaContent: String(jinaContent || ""),
+      });
+    }
+
+    // Step 4: Pre-resolve every template slot in code
+    const template = await this.readEmailTemplate();
+    const resolvedTemplate = this.resolveTemplateSlots(template, {
+      mailerFields,
+      engineResult,
+      recipientName,
+      yourName: "Bharatvaj",
+    });
+
+    // Step 5: Model lightly rephrases the pre-resolved template
+    let draft = resolvedTemplate;
+    if (resolvedTemplate && typeof this.contentService.generateDraftFromTemplate === "function") {
+      try {
+        const result = await this.contentService.generateDraftFromTemplate({
+          template: resolvedTemplate,
           abortSignal,
         });
-        templateDraftAccepted = isUsableTemplateDraft(draftResult);
+        if (result.draft && !hasUnresolvedTemplateToken(result.draft)) {
+          draft = result.draft;
+        }
       } catch (_error) {
-        // Template generation is preferred but optional.
+        // fall back to pre-resolved template
       }
     }
 
-    if (!templateDraftAccepted && !isUsableDraft(draftResult) && template) {
-      const templateFallbackDraft = fillTemplateFallback(template, {
-        recipientName,
-        mailerFields,
-      });
-      if (templateFallbackDraft) {
-        draftResult = {
-          draft: templateFallbackDraft,
-          compliance: validateDraft(templateFallbackDraft),
-          attempts: (Number(draftResult?.attempts) || 0) + 1,
-        };
-        templateDraftAccepted = isUsableTemplateDraft(draftResult);
-      }
-    }
+    // Step 6: Validate phrase slots against source content
+    const phraseCheck1 = validatePhraseSlot(mailerFields.topStrengthPhrase, jinaContent);
+    const phraseCheck2 = validatePhraseSlot(mailerFields.secondaryStrength, jinaContent);
 
-    if (
-      !templateDraftAccepted &&
-      !isUsableDraft(draftResult) &&
-      this.preferCombinedGeneration &&
-      typeof this.contentService.generateContent === "function"
-    ) {
+    // Step 7: Fact trace — proper nouns in draft must exist in extracted fields
+    const factCheck = validateFactTrace(draft, mailerFields);
+
+    // Step 8: Self-critique (cheap Ollama call with Y/N questions)
+    let critiqueResult = { ok: true };
+    if (typeof this.contentService.performSelfCritique === "function") {
       try {
-        const combinedResult = await this.contentService.generateContent(mailerFields, { abortSignal });
-        const combinedBody = normalizeDraft(combinedResult?.body);
-        const combinedSubject = normalizeSubject(combinedResult?.subject);
-
-        if (combinedBody) {
-          draftResult = {
-            draft: combinedBody,
-            compliance: combinedResult?.compliance?.draft || validateDraft(combinedBody),
-            attempts: Number(combinedResult?.attempts?.draft) || 1,
-          };
-        }
-        if (combinedSubject) {
-          finalSubjectResult = {
-            subject: combinedSubject,
-            compliance: combinedResult?.compliance?.subject || validateSubject(combinedSubject),
-            attempts: Number(combinedResult?.attempts?.subject) || 1,
-          };
-        }
+        critiqueResult = await this.contentService.performSelfCritique(draft, { abortSignal });
       } catch (_error) {
-        // Combined generation is an optimization path; fall back to split generation below.
+        // best-effort
       }
     }
 
-    if (!templateDraftAccepted && !isUsableDraft(draftResult)) {
-      for (let attempt = 0; attempt < draftIterations; attempt += 1) {
-        draftResult = await this.contentService.generateDraft(mailerFields, { abortSignal });
+    // Step 9: Subject generation
+    let finalSubjectResult = null;
+    try {
+      const subjectResult = await this.contentService.generateSubject(mailerFields, draft, { abortSignal });
+      if (isUsableSubject(subjectResult)) {
+        finalSubjectResult = subjectResult;
       }
-      if (!isUsableDraft(draftResult)) {
-        try {
-          draftResult = await this.contentService.generateDraft(mailerFields, { abortSignal });
-        } catch (_error) {
-          // Ignore retry failure and fall back below.
-        }
-      }
-      if (!isUsableDraft(draftResult)) {
-        const fallbackDraft = buildFallbackDraft(mailerFields);
-        draftResult = {
-          draft: fallbackDraft,
-          compliance: validateDraft(fallbackDraft),
-          attempts: (Number(draftResult?.attempts) || 0) + 1,
-        };
-      }
+    } catch (_error) {
+      // ignore; fall through to fallback
+    }
+    if (!finalSubjectResult) {
+      const fallbackSubject = buildFallbackSubject(mailerFields);
+      finalSubjectResult = {
+        subject: fallbackSubject,
+        compliance: validateSubject(fallbackSubject),
+        attempts: 1,
+      };
     }
 
-    if (!isUsableSubject(finalSubjectResult)) {
-      const subjectResult = await this.contentService.generateSubject(mailerFields, draftResult.draft, { abortSignal });
-      finalSubjectResult = subjectResult;
-      if (!isUsableSubject(finalSubjectResult)) {
-        const fallbackSubject = buildFallbackSubject(mailerFields);
-        finalSubjectResult = {
-          subject: fallbackSubject,
-          compliance: validateSubject(fallbackSubject),
-          attempts: (Number(subjectResult?.attempts) || 0) + 1,
-        };
-      }
-    }
-
-    const previewBody = buildFinalEmailBody(recipientName, draftResult.draft);
+    // Step 10: Confidence routing — LOW confidence or failed validation → needs_review
+    const validationOk = phraseCheck1.ok && phraseCheck2.ok && factCheck.ok && critiqueResult.ok;
+    const needsReview = tableOnlyMode || engineResult.confidence === "LOW" || !validationOk;
 
     return {
       ok: true,
@@ -496,12 +539,19 @@ class CampaignSendService {
       to: recipientEmail,
       recipientName: recipientName || "there",
       subject: finalSubjectResult.subject,
-      generatedBody: draftResult.draft,
-      body: previewBody,
+      generatedBody: draft,
+      body: draft,
       mailerFields,
-      draftIterations,
+      engineResult,
+      reviewSignal: reviewResult.reviewSignal,
+      engineConfidence: engineResult.confidence,
+      needsReview,
+      tableOnlyMode,
+      draftIterations: 1,
       compliance: {
-        draft: draftResult.compliance,
+        phraseSlots: { topStrength: phraseCheck1, secondaryStrength: phraseCheck2 },
+        factTrace: factCheck,
+        selfCritique: critiqueResult,
         subject: finalSubjectResult.compliance,
       },
     };

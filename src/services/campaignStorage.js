@@ -64,6 +64,7 @@ const ROW_STATUS_FETCHED = "fetched";
 const ROW_STATUS_GENERATING_MAIL = "generating_mail";
 const ROW_STATUS_GENERATING_PREVIEW = "generating_preview";
 const ROW_STATUS_READY = "ready";
+const ROW_STATUS_NEEDS_REVIEW = "needs_review";
 const ROW_STATUS_SENT = "sent";
 const ROW_STATUS_PAUSED = "paused";
 const ROW_STATUS_AWAITING_VERIFICATION = "awaiting_verification";
@@ -833,6 +834,7 @@ class CampaignStorage {
       : 120000;
     this.chromeBrowserPromise = null;
     this.chromePagePromise = null;
+    this.sharedBrowserSession = null;
     this.activeRuns = new Map();
     this.runControls = new Map();
     this.campaignLockChains = new Map();
@@ -1209,6 +1211,10 @@ class CampaignStorage {
     this.campaignEventNotifier = typeof notifier === "function" ? notifier : null;
   }
 
+  setSharedBrowserSession(session) {
+    this.sharedBrowserSession = session || null;
+  }
+
   async emitCampaignEvent(campaignId, event) {
     if (!this.campaignEventNotifier) {
       return;
@@ -1269,6 +1275,7 @@ class CampaignStorage {
         ROW_STATUS_GENERATING_PREVIEW,
         ROW_STATUS_AWAITING_VERIFICATION,
         ROW_STATUS_READY,
+        ROW_STATUS_NEEDS_REVIEW,
         ROW_STATUS_SENT,
         ROW_STATUS_PAUSED,
         ROW_STATUS_FAILED,
@@ -2050,6 +2057,7 @@ class CampaignStorage {
               rowIndex: row.rowNumber,
               notifyUI,
               abortSignal: fetchAbortController?.signal,
+              sharedSession: this.sharedBrowserSession,
             });
           } finally {
             this.releaseRunAbortController(campaignId, fetchAbortController);
@@ -2335,6 +2343,10 @@ class CampaignStorage {
             doneRow.emailGeneratedBody = previewGeneratedBody;
             doneRow.emailBody = previewBody;
             doneRow.emailStatus = "preview_ready";
+            doneRow.engineResult = previewResult?.engineResult || null;
+            doneRow.reviewSignal = previewResult?.reviewSignal || "none";
+            doneRow.engineConfidence = previewResult?.engineConfidence || null;
+            doneRow.needsReview = Boolean(previewResult?.needsReview);
             doneRow.sourceRow = {
               ...(doneRow.sourceRow && typeof doneRow.sourceRow === "object" ? doneRow.sourceRow : {}),
               [EMAIL_TO_COLUMN]: previewTo,
@@ -2412,7 +2424,12 @@ class CampaignStorage {
         const finalRow = metadata?.rows?.[index];
         failureStage = "finalize";
         if (finalRow) {
-          finalRow.status = finalRow.emailStatus === "sent" ? ROW_STATUS_SENT : ROW_STATUS_READY;
+          finalRow.status =
+            finalRow.emailStatus === "sent"
+              ? ROW_STATUS_SENT
+              : finalRow.needsReview
+                ? ROW_STATUS_NEEDS_REVIEW
+                : ROW_STATUS_READY;
           finalRow.durationMs = Date.now() - rowStartedAt;
           finalRow.completedAt = new Date().toISOString();
           finalRow.error = compact(finalRow.jinaError);
@@ -2670,6 +2687,7 @@ class CampaignStorage {
             rowIndex: rowNumber,
             notifyUI,
             abortSignal: fetchAbortController?.signal,
+            sharedSession: this.sharedBrowserSession,
           });
         } finally {
           this.releaseRunAbortController(campaignId, fetchAbortController);
@@ -2919,6 +2937,10 @@ class CampaignStorage {
           doneRow.emailGeneratedBody = previewGeneratedBody;
           doneRow.emailBody = previewBody;
           doneRow.emailStatus = "preview_ready";
+          doneRow.engineResult = previewResult?.engineResult || null;
+          doneRow.reviewSignal = previewResult?.reviewSignal || "none";
+          doneRow.engineConfidence = previewResult?.engineConfidence || null;
+          doneRow.needsReview = Boolean(previewResult?.needsReview);
           doneRow.sourceRow = {
             ...(doneRow.sourceRow && typeof doneRow.sourceRow === "object" ? doneRow.sourceRow : {}),
             [EMAIL_TO_COLUMN]: previewTo,
@@ -2997,7 +3019,12 @@ class CampaignStorage {
         if (!finalRow) {
           return;
         }
-        finalRow.status = finalRow.emailStatus === "sent" ? ROW_STATUS_SENT : ROW_STATUS_READY;
+        finalRow.status =
+          finalRow.emailStatus === "sent"
+            ? ROW_STATUS_SENT
+            : finalRow.needsReview
+              ? ROW_STATUS_NEEDS_REVIEW
+              : ROW_STATUS_READY;
         finalRow.durationMs = Date.now() - generationStartedAt;
         finalRow.completedAt = new Date().toISOString();
         finalRow.error = compact(finalRow.jinaError);

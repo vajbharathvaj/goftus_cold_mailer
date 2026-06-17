@@ -1,22 +1,17 @@
-Hi [FirstName],
+Hi {firstName},
 
-Noticed [Company] is [specific observation pain point based on data]. That one task alone is probably costing your team [X days] per order.
+Spent real time inside {companyName}: {topStrengthPhrase}, and that's genuinely hard to build. {secondaryStrength} especially stands out.
 
-Here's the honest picture:
+Which is exactly what made one thing jump out. You've already won the hard argument: {differentiator} that {competitorFrame} can't match. But the edge between similar {customerType} platforms is increasingly won around the product: {blockage}. That's usually the last manual layer at a team your size.
 
-Best case senario:This has to be the decision that 10x's your ops.
+That's exactly the layer teams like yours automate to {benefit1} and {benefit2}, without pulling the team off work that clearly already works.
 
-Worst case: you get a valuable demo that costs nothing  and, a team working alongside you, for free, until you do get that. (if agreed) Just results first.
+You don't need help with the hard part. This is just the next gear.
 
-Either way, you win. This is only for limited companies.
+Quick one so I'm not guessing, does this land?
+Reply "worth a look" and I'll show you exactly what I'd automate.
+Or reply "not a fit" and I'll close the file, you won't hear from me again.
 
-I built a [AssetName] specifically for [Company] that shows exactly where the friction is and how automating it makes the scaling much better.
+{yourName}, Goftus
 
-Want me to send it over? If not, a quick "No" will save me further research on  [Company].
-
-
-
-
-
-
-
+P.S. Based only on public info, your site and reviews, so I may be missing the internal picture.

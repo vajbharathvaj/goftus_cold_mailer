@@ -52,6 +52,31 @@
             <small id="chromeText">Checking</small>
           </button>
         </div>
+
+        <div class="sidebar-model-tier" id="modelTierSidebar">
+          <p class="mono-label sidebar-section-label">AI Model</p>
+          <div class="model-tier-row" id="tierPrimaryRow">
+            <span class="dot dot-grey" id="tierPrimaryDot"></span>
+            <div class="model-tier-info">
+              <span class="model-tier-name" id="tierPrimaryName">GPT Primary</span>
+              <small class="model-tier-meta" id="tierPrimaryMeta"></small>
+            </div>
+          </div>
+          <div class="model-tier-row" id="tierSecondaryRow">
+            <span class="dot dot-grey" id="tierSecondaryDot"></span>
+            <div class="model-tier-info">
+              <span class="model-tier-name" id="tierSecondaryName">OSS Secondary</span>
+              <small class="model-tier-meta" id="tierSecondaryMeta"></small>
+            </div>
+          </div>
+          <div class="model-tier-row" id="tierTableRow">
+            <span class="dot dot-grey" id="tierTableDot"></span>
+            <div class="model-tier-info">
+              <span class="model-tier-name">Table Engine</span>
+              <small class="model-tier-meta" id="tierTableMeta">Free fallback</small>
+            </div>
+          </div>
+        </div>
       </aside>
 
       <section class="main-area">
@@ -204,6 +229,15 @@
                 <button id="pauseResumeBtn" class="btn btn-ghost" type="button">Pause</button>
                 <button id="stopRunBtn" class="btn btn-danger" type="button">Stop</button>
                 <button id="resetRunBtn" class="btn btn-ghost" type="button">Reset</button>
+                <div id="modelTierSwitchPanel" class="model-tier-switch-panel">
+                  <span class="model-tier-active-badge" id="modelTierActiveBadge">TABLE</span>
+                  <select id="modelTierSelectCtrl" class="model-tier-select-ctrl">
+                    <option value="primary">GPT Primary</option>
+                    <option value="secondary">OSS Secondary</option>
+                    <option value="table">Table Engine</option>
+                  </select>
+                  <button id="modelSwitchStopBtn" class="btn btn-ghost" type="button">Switch &amp; Stop</button>
+                </div>
                 <div class="campaign-send-all">
                   <div class="campaign-send-controls">
                     <label class="send-all-count-label" for="senderSelect">Sender</label>

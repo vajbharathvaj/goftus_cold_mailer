@@ -271,12 +271,91 @@ function validateSubject(subject) {
   };
 }
 
+function validatePhraseSlot(value, jinaContent) {
+  const text = String(value || "").trim();
+  if (!text) return { ok: true };
+  const words = text.split(/\s+/).filter(Boolean);
+
+  if (words.length > 8) {
+    return { ok: false, reason: `phrase slot too long (${words.length} words, max 8): "${text}"` };
+  }
+
+  // Three or more consecutive title-case words indicates a raw headline
+  const titleCaseRun = words.filter((w) => /^[A-Z][a-z]/.test(w));
+  if (titleCaseRun.length >= 3) {
+    return { ok: false, reason: `title-case run detected in phrase slot: "${text}"` };
+  }
+
+  // Phrase appears verbatim as a heading in the source content
+  const src = String(jinaContent || "");
+  if (src) {
+    const escaped = text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    if (new RegExp(`^#{1,4}\\s+${escaped}|^${escaped}\\s*$`, "im").test(src)) {
+      return { ok: false, reason: `phrase appears verbatim as heading in source: "${text}"` };
+    }
+  }
+
+  return { ok: true };
+}
+
+function validateFactTrace(draft, extractedFields) {
+  const allFactText = Object.values(extractedFields || {})
+    .filter((v) => typeof v === "string")
+    .join(" ")
+    .toLowerCase();
+
+  const ALWAYS_ALLOWED = new Set([
+    "Hi", "I", "You", "The", "This", "That", "But", "Which", "Reply", "Or",
+    "Quick", "Based", "Happy", "Goftus", "Bharatvaj",
+  ]);
+
+  const properNounsInDraft = (draft.match(/\b[A-Z][a-z]{1,}(?:\s+[A-Z][a-z]{1,})*/g) || [])
+    .filter((noun) => !ALWAYS_ALLOWED.has(noun.split(" ")[0]));
+
+  const uninvented = properNounsInDraft.filter(
+    (noun) => !allFactText.includes(noun.toLowerCase())
+  );
+
+  return {
+    ok: uninvented.length === 0,
+    uninventedClaims: [...new Set(uninvented)],
+  };
+}
+
+function buildSelfCritiquePrompt(draft) {
+  return [
+    "Answer each question with only Y or N. No other text.",
+    "1. Does any sentence claim the company lacks something its own product or service provides? Y/N",
+    "2. Is every sentence grammatically correct? Y/N",
+    "3. Are there any dashes used as punctuation (hyphen, en dash, em dash)? Y/N",
+    "",
+    "Email to review:",
+    String(draft || "").trim(),
+  ].join("\n");
+}
+
+function parseSelfCritiqueResponse(raw) {
+  const text = String(raw || "").trim();
+  const q1 = /1[.):\s]*([YN])/i.exec(text);
+  const q2 = /2[.):\s]*([YN])/i.exec(text);
+  const q3 = /3[.):\s]*([YN])/i.exec(text);
+  const claimsCompanyLacks = q1 ? q1[1].toUpperCase() === "Y" : false;
+  const isGrammatical = q2 ? q2[1].toUpperCase() === "Y" : true;
+  const hasDashes = q3 ? q3[1].toUpperCase() === "Y" : false;
+  const ok = !claimsCompanyLacks && isGrammatical && !hasDashes;
+  return { ok, claimsCompanyLacks, isGrammatical, hasDashes };
+}
+
 module.exports = {
   normalizeDraft,
   normalizeDraftPreserveLines,
   normalizeSubject,
   validateDraft,
   validateSubject,
+  validatePhraseSlot,
+  validateFactTrace,
+  buildSelfCritiquePrompt,
+  parseSelfCritiqueResponse,
   countWords,
   splitSentences,
   parseStructuredEmailOutput,

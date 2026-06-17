@@ -154,7 +154,7 @@ function markVerification(rowNumber,payload){const rn=Number(rowNumber);if(!Numb
 function clearVerification(rowNumber){const rn=Number(rowNumber);if(!Number.isFinite(rn)||rn<1)return;state.verification.delete(rn);}
 function parseEventRow(event){return Number(event?.rowNumber||event?.rowIndex||0);}
 function showVerificationPopup(event){const campaignId=String(event?.campaignId||state.campaign?.id||'').trim();const rowNumber=parseEventRow(event);const domain=String(event?.domain||'').trim();const message=String(event?.message||'Verification required.').trim();if(!campaignId||!rowNumber)return;closeVerificationPopup();const popup=document.createElement('div');popup.id='verification-popup';popup.innerHTML=`<div class="verification-overlay"><div class="verification-modal"><div class="verification-icon">!</div><h3>Verification Required</h3><p class="verification-domain">${domain||'target website'}</p><p class="verification-message">${message}</p><div class="verification-steps"><div class="step">1. Look at the opened Chrome window</div><div class="step">2. Solve the verification/CAPTCHA</div><div class="step">3. Click Continue</div></div><div class="verification-actions"><button class="btn-verification-continue" type="button">Continue</button><button class="btn-verification-skip" type="button">Skip This Row</button></div></div></div>`;const continueBtn=popup.querySelector('.btn-verification-continue');const skipBtn=popup.querySelector('.btn-verification-skip');continueBtn?.addEventListener('click',async()=>{continueBtn.disabled=true;try{await api(`/api/campaigns/${encodeURIComponent(campaignId)}/resume-row`,{rowIndex:rowNumber});clearVerification(rowNumber);closeVerificationPopup();try{const fresh=await api(`/api/campaigns/${encodeURIComponent(campaignId)}`,null,'GET');if(fresh?.campaign&&setCampaign(fresh.campaign)){renderCampaign();}}catch{}}catch(e){rawOutput.textContent=j({error:e.message||'Resume failed'});continueBtn.disabled=false;}});skipBtn?.addEventListener('click',async()=>{skipBtn.disabled=true;try{await api(`/api/campaigns/${encodeURIComponent(campaignId)}/skip-row`,{rowIndex:rowNumber});clearVerification(rowNumber);closeVerificationPopup();try{const fresh=await api(`/api/campaigns/${encodeURIComponent(campaignId)}`,null,'GET');if(fresh?.campaign&&setCampaign(fresh.campaign,{force:true})){renderCampaign();}}catch{}}catch(e){rawOutput.textContent=j({error:e.message||'Skip failed'});skipBtn.disabled=false;}});document.body.appendChild(popup);}
-function handleCampaignEvent(event){if(!event||typeof event!=='object')return;const eventType=String(event.type||'').toLowerCase();const rowNumber=parseEventRow(event);if(eventType==='verification_required'){markVerification(rowNumber,{status:'awaiting',domain:event.domain,message:event.message});showVerificationPopup(event);renderCampaign();return;}if(eventType==='verification_cleared'){clearVerification(rowNumber);closeVerificationPopup();renderCampaign();return;}if(eventType==='row_skipped'){clearVerification(rowNumber);closeVerificationPopup();renderCampaign();}}
+function handleCampaignEvent(event){if(!event||typeof event!=='object')return;const eventType=String(event.type||'').toLowerCase();const rowNumber=parseEventRow(event);if(eventType==='model_tier_changed'){if(typeof renderModelTier==='function')renderModelTier(event);return;}if(eventType==='verification_required'){markVerification(rowNumber,{status:'awaiting',domain:event.domain,message:event.message});showVerificationPopup(event);renderCampaign();return;}if(eventType==='verification_cleared'){clearVerification(rowNumber);closeVerificationPopup();renderCampaign();return;}if(eventType==='row_skipped'){clearVerification(rowNumber);closeVerificationPopup();renderCampaign();}}
 function connectCampaignEvents(campaignId){const cid=String(campaignId||'').trim();if(!cid)return;if(state.eventCampaignId===cid&&state.eventSource)return;closeCampaignEvents();state.eventCampaignId=cid;try{const es=new EventSource(`/api/campaigns/${encodeURIComponent(cid)}/events`);state.eventSource=es;es.onmessage=(evt)=>{try{const payload=JSON.parse(evt.data||'{}');handleCampaignEvent(payload);}catch{}};es.onerror=()=>{if(state.eventCampaignId!==cid)return;closeCampaignEvents(true);state.eventReconnect=setTimeout(()=>{if(state.eventCampaignId===cid)connectCampaignEvents(cid);},3000);};}catch{}}
 
 function resetCampaignUi(){state.bulkSend={active:false,total:0,sent:0,failed:0,currentRow:null,nextDelayMs:0,message:'',stopRequested:false};state.campaign=null;state.campaignSig='';state.expanded=null;state.selectedRows.clear();state.selectionAnchorRow=null;state.previews.clear();state.verification.clear();state.mailSenders.bulkUsageByDomain={};state.mailSenders.bulkUsageBySender={};closeVerificationPopup();runConsole.classList.add('hidden');runSummary.classList.add('hidden');queueRowsEl.innerHTML='';if(sendAllMeta)sendAllMeta.textContent='';if(sendAllBtn)sendAllBtn.disabled=true;if(sendAllCountInput)sendAllCountInput.disabled=true;if(sendBulk30Btn)sendBulk30Btn.disabled=true;if(senderMeta)senderMeta.textContent='';if(queueSelectAllBtn)queueSelectAllBtn.disabled=true;if(queueDeleteSelectedBtn)queueDeleteSelectedBtn.disabled=true;if(queueSelectedMeta)queueSelectedMeta.textContent='';stopPolling();closeCampaignEvents();clearStoreId();}
@@ -176,7 +176,7 @@ function buildPreviewFromRow(row){if(!row)return null;const to=String(row.emailT
 function ensurePreviewStateForRow(rowNumber){const rn=Number(rowNumber);if(!Number.isFinite(rn)||rn<1)return null;const existing=pGet(rn);if(existing?.preview)return existing;const row=getCampaignRow(rn);const preview=buildPreviewFromRow(row);if(!preview)return null;const rs=String(row?.status||'').toLowerCase();const sent=isRowSent(row);pSet(rn,{phase:sent||rs==='sent'?'sent':'ready',message:sent?'Email already sent.':'Preview ready',preview,editingBody:false,to:preview.to,subject:preview.subject,body:preview.body});return pGet(rn);}
 function isRowSendReady(row){if(isRowSent(row))return false;const rs=String(row?.status||'').toLowerCase();const es=String(row?.emailStatus||row?.sourceRow?.email_status||'').toLowerCase();if(!(rs==='ready'||es==='preview_ready'))return false;const preview=buildPreviewFromRow(row);if(!preview)return false;if(!String(preview.to||'').trim())return false;return true;}
 function getSendReadyRows(campaign){const rows=Array.isArray(campaign?.rows)?campaign.rows:[];return rows.filter(row=>isRowSendReady(row));}
-function rowUi(row){const rn=Number(row?.rowNumber);const rs=String(row?.status||'').toLowerCase();const es=String(row?.emailStatus||row?.sourceRow?.email_status||'').toLowerCase();const blocked=isFetchBlocked(row);const protectedRow=isProtectedRow(row);const vr=state.verification.get(rn);const previewState=pGet(rn);const contactEmail=lower(row?.contactEmail||row?.sourceRow?.email||row?.sourceRow?.Email||'');if(contactEmail&&isEmailBlocked(contactEmail)){const entry=getBlocklistEntry(contactEmail);return{dot:'blocked',label:'Do Not Send',blocklisted:true,blocklistEntry:entry,contactEmail};}if(vr||rs==='awaiting_verification')return {dot:'warning',label:'Awaiting verification'};if(previewState?.phase==='sending')return {dot:'processing',label:'Sending email...'};if(previewState?.phase==='sent')return {dot:'sent',label:blocked?'Sent (fetch blocked)':'Sent'};if(es==='sent'||rs==='sent')return {dot:'sent',label:blocked?'Sent (fetch blocked)':'Sent'};if(protectedRow)return {dot:'failed',label:'Protected website (mail disabled)'};if(rs==='ready'||es==='preview_ready'){if(isRowSendReady(row))return {dot:blocked?'warning':'done',label:blocked?'Ready (fetch blocked)':'Ready'};return {dot:'paused',label:blocked?'Ready (fetch blocked, no mail)':'Ready (no mail preview)'};}if(rs==='fetched')return {dot:'queued',label:blocked?'Fetched (blocked context)':'Fetched (waiting preview)'};if(rs==='generating_preview')return {dot:'processing',label:'Generating preview...'};if(rs==='generating_mail')return {dot:'processing',label:'Generating mail info...'};if(rs==='fetching')return {dot:'processing',label:'Fetching website...'};if(rs==='paused')return {dot:'paused',label:'Paused'};if(rs==='failed')return {dot:'failed',label:'Failed'};return {dot:'queued',label:'Queued'};}
+function rowUi(row){const rn=Number(row?.rowNumber);const rs=String(row?.status||'').toLowerCase();const es=String(row?.emailStatus||row?.sourceRow?.email_status||'').toLowerCase();const blocked=isFetchBlocked(row);const protectedRow=isProtectedRow(row);const vr=state.verification.get(rn);const previewState=pGet(rn);const contactEmail=lower(row?.contactEmail||row?.sourceRow?.email||row?.sourceRow?.Email||'');if(contactEmail&&isEmailBlocked(contactEmail)){const entry=getBlocklistEntry(contactEmail);return{dot:'blocked',label:'Do Not Send',blocklisted:true,blocklistEntry:entry,contactEmail};}if(vr||rs==='awaiting_verification')return {dot:'warning',label:'Awaiting verification'};if(previewState?.phase==='sending')return {dot:'processing',label:'Sending email...'};if(previewState?.phase==='sent')return {dot:'sent',label:blocked?'Sent (no website data)':'Sent'};if(es==='sent'||rs==='sent')return {dot:'sent',label:blocked?'Sent (no website data)':'Sent'};if(protectedRow)return {dot:'failed',label:'Protected website (mail disabled)'};if(rs==='ready'||es==='preview_ready'){if(isRowSendReady(row))return {dot:blocked?'warning':'done',label:blocked?'Ready (no website data)':'Ready'};return {dot:'paused',label:blocked?'Ready (no data, no mail)':'Ready (no mail preview)'};}if(rs==='fetched')return {dot:'queued',label:blocked?'Fetched (no content)':'Fetched (waiting preview)'};if(rs==='generating_preview')return {dot:'processing',label:'Generating preview...'};if(rs==='generating_mail')return {dot:'processing',label:'Generating mail info...'};if(rs==='fetching')return {dot:'processing',label:'Fetching website...'};if(rs==='paused')return {dot:'paused',label:'Paused'};if(rs==='failed')return {dot:'failed',label:'Failed'};return {dot:'queued',label:'Queued'};}
 function btnCopy(text){const b=document.createElement('button');b.type='button';b.className='copy-btn';b.textContent='Copy';b.addEventListener('click',async()=>{try{await navigator.clipboard.writeText(String(text||''));b.textContent='Copied';setTimeout(()=>b.textContent='Copy',900);}catch{b.textContent='Failed';setTimeout(()=>b.textContent='Copy',900);}});return b;}
 function expandText(content,empty='No content'){const wrap=document.createElement('div');wrap.className='expand-content';const v=String(content||'').trim();if(!v){wrap.textContent=empty;return wrap;}if(v.length<=PREVIEW_LEN){wrap.textContent=v;return wrap;}const preview=`${v.slice(0,PREVIEW_LEN).trimEnd()}...`;const p=document.createElement('p');p.style.margin='0';p.textContent=preview;let ex=false;const t=document.createElement('button');t.type='button';t.className='btn btn-ghost';t.style.marginTop='8px';t.style.height='28px';t.textContent='Read more';t.addEventListener('click',()=>{ex=!ex;p.textContent=ex?v:preview;t.textContent=ex?'Read less':'Read more';});wrap.append(p,t);return wrap;}
 
@@ -462,3 +462,86 @@ if(resetRunBtn)resetRunBtn.addEventListener('click',()=>resetRun());
 navBtns.forEach(b=>b.addEventListener('click',()=>setView(b.dataset.view)));
 
 bindUpload();bindCopy();bindNoMailView();setView('campaign');setMainStatus('idle','IDLE');setComplianceBadge(null);setDraftProgress(0,'Idle');refreshHealth(false);loadMailSenders({silent:true});loadHistory();loadLatest();loadBlocklist();
+
+// ── Model Tier ──────────────────────────────────────────────────────────────
+const tierPrimaryDot=$('#tierPrimaryDot');
+const tierPrimaryName=$('#tierPrimaryName');
+const tierPrimaryMeta=$('#tierPrimaryMeta');
+const tierSecondaryDot=$('#tierSecondaryDot');
+const tierSecondaryName=$('#tierSecondaryName');
+const tierSecondaryMeta=$('#tierSecondaryMeta');
+const tierTableDot=$('#tierTableDot');
+const tierTableMeta=$('#tierTableMeta');
+const modelTierActiveBadge=$('#modelTierActiveBadge');
+const modelTierSelectCtrl=$('#modelTierSelectCtrl');
+const modelSwitchStopBtn=$('#modelSwitchStopBtn');
+
+state.modelTier=null;
+
+const TIER_COST_PRECISION=4;
+function fmtCost(usd){if(!usd||usd<0.0001)return '$0';return `$${Number(usd).toFixed(TIER_COST_PRECISION)}`;}
+function fmtTokens(n){const v=Number(n)||0;if(v>=1000)return `${(v/1000).toFixed(1)}k tok`;return `${v} tok`;}
+
+function renderModelTier(status){
+  if(!status||!Array.isArray(status.tiers))return;
+  state.modelTier=status;
+  const current=compact(status.currentTier);
+
+  // Update active badge in run header
+  if(modelTierActiveBadge){
+    const activeT=status.tiers.find(t=>t.name===current);
+    modelTierActiveBadge.textContent=compact(activeT?.label||current).toUpperCase();
+    modelTierActiveBadge.className=`model-tier-active-badge tier-${current}`;
+  }
+  if(modelTierSelectCtrl)modelTierSelectCtrl.value=current;
+
+  status.tiers.forEach(tier=>{
+    const isCurrent=tier.name===current;
+    let dot,nameEl,metaEl;
+    if(tier.name==='primary'){dot=tierPrimaryDot;nameEl=tierPrimaryName;metaEl=tierPrimaryMeta;}
+    else if(tier.name==='secondary'){dot=tierSecondaryDot;nameEl=tierSecondaryName;metaEl=tierSecondaryMeta;}
+    else if(tier.name==='table'){dot=tierTableDot;metaEl=tierTableMeta;}
+    else return;
+
+    if(dot){
+      const isTableTier=tier.name==='table';
+      dot.className=`dot ${isCurrent?'dot-green':(!isTableTier&&!tier.available)?'dot-amber':'dot-grey'}`;
+      dot.title=isCurrent?'Active now':(isTableTier?'Always available':(tier.available?'Configured':'Not configured'));
+    }
+    if(nameEl)nameEl.textContent=compact(tier.label||tier.name)+(isCurrent?' ★':'');
+    if(metaEl){
+      if(tier.name==='table'){metaEl.textContent=isCurrent?'Active (LLM offline)':'Free fallback';}
+      else{const parts=[];if(Number(tier.tokensUsed)>0)parts.push(fmtTokens(tier.tokensUsed));if(Number(tier.estimatedCostUsd)>0)parts.push(fmtCost(tier.estimatedCostUsd));if(!tier.available)parts.push('not configured');else if(isCurrent)parts.push('active');metaEl.textContent=parts.join(' | ')||'0 tokens';}
+    }
+  });
+}
+
+async function pollModelTier(){
+  try{const d=await api('/api/model-tier',null,'GET');if(d?.tiers)renderModelTier(d);}catch{}
+}
+
+async function switchModelTier(tierName,campaignId){
+  if(!tierName)return;
+  if(modelSwitchStopBtn)modelSwitchStopBtn.disabled=true;
+  try{
+    const payload={tier:tierName};
+    if(campaignId)payload.campaignId=campaignId;
+    const d=await api('/api/model-tier',payload);
+    if(d?.tiers)renderModelTier(d);
+  }catch(e){setMainStatus('error','TIER SWITCH FAILED');rawOutput.textContent=j({error:e.message||'Tier switch failed'});}
+  finally{if(modelSwitchStopBtn)modelSwitchStopBtn.disabled=false;}
+}
+
+// Wire switch button
+if(modelSwitchStopBtn){
+  modelSwitchStopBtn.addEventListener('click',()=>{
+    const tierName=compact(modelTierSelectCtrl?.value);
+    const cid=compact(state.campaign?.id);
+    switchModelTier(tierName,cid||undefined);
+  });
+}
+
+// Poll tier status every 15 seconds
+pollModelTier();
+setInterval(pollModelTier,15000);
+// ────────────────────────────────────────────────────────────────────────────

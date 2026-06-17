@@ -1363,6 +1363,8 @@ async function fetchViaRealChromeProfile(url, options = {}) {
   };
   assertNotAborted();
 
+  const sharedContext = options.sharedContext || null;
+
   const targetUrl = normalizeAbsoluteUrl(url);
   if (!targetUrl) {
     throw new Error("Invalid URL for chrome profile layer");
@@ -1431,13 +1433,13 @@ async function fetchViaRealChromeProfile(url, options = {}) {
   const shouldMirrorFromDefault = forceMirrorProfile && isDefaultChromeUserDataDir(userDataDir);
   // Mirrored profile mode does not attach to the live user profile, so it can run while Chrome stays open.
   const bypassRunningChromeGuard = profileSearchOnly || allowWhileOpenEnabled || shouldMirrorFromDefault;
-  if (isChromeRunning() && !bypassRunningChromeGuard) {
+  if (!sharedContext && isChromeRunning() && !bypassRunningChromeGuard) {
     throw new Error(
       "Chrome is currently running. Close all Chrome windows first so the real profile can be used reliably. " +
         "If you need this to run with Chrome open, set CHROME_PROFILE_ALLOW_WHILE_OPEN=true."
     );
   }
-  if (shouldMirrorFromDefault) {
+  if (!sharedContext && shouldMirrorFromDefault) {
     log(`default chrome user-data-dir detected; preparing mirrored profile dir=${mirrorUserDataDir}`);
     try {
       launchUserDataDir = await prepareMirroredUserDataDir({
@@ -1453,46 +1455,58 @@ async function fetchViaRealChromeProfile(url, options = {}) {
 
   let context;
   let abortHandler = null;
-  try {
-    context = await chromium.launchPersistentContext(launchUserDataDir, {
-      executablePath,
-      headless: launchHeadless,
-      args: [
-        `--profile-directory=${profileName}`,
-        `--window-size=${profileWindowWidth},${profileWindowHeight}`,
-        "--window-position=0,0",
-        "--no-first-run",
-        "--no-default-browser-check",
-        "--disable-popup-blocking",
-        "--disable-blink-features=AutomationControlled",
-      ],
-      ignoreDefaultArgs: ["--enable-automation"],
-      viewport: { width: profileWindowWidth, height: profileWindowHeight },
-      timeout: timeoutMs,
-    });
-    if (abortSignal) {
-      abortHandler = () => {
-        context.close().catch(() => {});
-      };
-      abortSignal.addEventListener("abort", abortHandler, { once: true });
-      assertNotAborted();
+  let page; // hoisted so the finally block can close it when using a sharedContext
+  if (sharedContext) {
+    context = sharedContext;
+  } else {
+    try {
+      context = await chromium.launchPersistentContext(launchUserDataDir, {
+        executablePath,
+        headless: launchHeadless,
+        args: [
+          `--profile-directory=${profileName}`,
+          `--window-size=${profileWindowWidth},${profileWindowHeight}`,
+          "--window-position=0,0",
+          "--no-first-run",
+          "--no-default-browser-check",
+          "--disable-popup-blocking",
+          "--disable-blink-features=AutomationControlled",
+        ],
+        ignoreDefaultArgs: ["--enable-automation"],
+        viewport: { width: profileWindowWidth, height: profileWindowHeight },
+        timeout: timeoutMs,
+      });
+      if (abortSignal) {
+        abortHandler = () => {
+          context.close().catch(() => {});
+        };
+        abortSignal.addEventListener("abort", abortHandler, { once: true });
+        assertNotAborted();
+      }
+    } catch (error) {
+      const message = String(error?.message || "");
+      if (/DevTools remote debugging requires a non-default data directory/i.test(message)) {
+        throw new Error(
+          "Chrome blocked remote debugging on the default profile directory. " +
+            "Enable mirrored profile launch with CHROME_FORCE_MIRROR_PROFILE=true (default) " +
+            `and set CHROME_AUTOMATION_USER_DATA_DIR (current mirror dir: ${mirrorUserDataDir}).`
+        );
+      }
+      throw error;
     }
-  } catch (error) {
-    const message = String(error?.message || "");
-    if (/DevTools remote debugging requires a non-default data directory/i.test(message)) {
-      throw new Error(
-        "Chrome blocked remote debugging on the default profile directory. " +
-          "Enable mirrored profile launch with CHROME_FORCE_MIRROR_PROFILE=true (default) " +
-          `and set CHROME_AUTOMATION_USER_DATA_DIR (current mirror dir: ${mirrorUserDataDir}).`
-      );
-    }
-    throw error;
+    log(
+      `context launched profile=${profileName} headless=${launchHeadless} timeoutMs=${timeoutMs} debugHoldMs=${debugHoldMs} userDataDir=${launchUserDataDir}`
+    );
   }
 
-  log(
-    `context launched profile=${profileName} headless=${launchHeadless} timeoutMs=${timeoutMs} debugHoldMs=${debugHoldMs} userDataDir=${launchUserDataDir}`
-  );
-  let page = await context.newPage();
+  page = await context.newPage();
+  if (sharedContext && abortSignal) {
+    abortHandler = () => {
+      page.close().catch(() => {});
+    };
+    abortSignal.addEventListener("abort", abortHandler, { once: true });
+    assertNotAborted();
+  }
   context.on("response", trackTargetDocumentStatus);
   try {
     assertNotAborted();
@@ -1724,17 +1738,22 @@ async function fetchViaRealChromeProfile(url, options = {}) {
     log(`navigation committed finalUrl=${page.url()} effectiveTargetUrl=${effectiveTargetUrl}`);
 
     // Close leftover blank tabs so only the target website tab remains visible.
-    let closedBlankTabs = 0;
-    for (const extraPage of context.pages()) {
-      if (extraPage === page) {
-        continue;
+    // Skip this when using a shared context — concurrent fetches for other rows may have
+    // tabs that are still at about:blank while waiting to navigate, and closing them would
+    // kill those in-flight fetches.
+    if (!sharedContext) {
+      let closedBlankTabs = 0;
+      for (const extraPage of context.pages()) {
+        if (extraPage === page) {
+          continue;
+        }
+        if (compact(extraPage.url()).toLowerCase() === "about:blank") {
+          await extraPage.close().catch(() => {});
+          closedBlankTabs += 1;
+        }
       }
-      if (compact(extraPage.url()).toLowerCase() === "about:blank") {
-        await extraPage.close().catch(() => {});
-        closedBlankTabs += 1;
-      }
+      log(`blank tab cleanup closed=${closedBlankTabs} remainingTabs=${context.pages().length}`);
     }
-    log(`blank tab cleanup closed=${closedBlankTabs} remainingTabs=${context.pages().length}`);
     if (!launchHeadless) {
       // networkidle waits for all trackers/analytics to go quiet — skip in headless (saves 0–12s).
       await page.waitForLoadState("networkidle", { timeout: Math.min(timeoutMs, 12000) }).catch(() => {});
@@ -1864,9 +1883,15 @@ async function fetchViaRealChromeProfile(url, options = {}) {
       log("debug hold completed");
     }
     context.off("response", trackTargetDocumentStatus);
-    log("closing chrome persistent context");
-    await context.close().catch(() => {});
-    log("context closed");
+    if (sharedContext) {
+      log("shared context: closing page tab");
+      await page?.close().catch(() => {});
+      log("page tab closed");
+    } else {
+      log("closing chrome persistent context");
+      await context.close().catch(() => {});
+      log("context closed");
+    }
   }
 }
 
@@ -1881,10 +1906,13 @@ module.exports = {
   handleCookieConsent,
   hardReloadIgnoringCache,
   isBotChallenge,
+  isChromeRunning,
+  isDefaultChromeUserDataDir,
   buildPageTextSnapshot,
   maximizeChromeWindow,
   openLinkFromCurrentPage,
   openFirstGoogleResult,
+  prepareMirroredUserDataDir,
   randomHumanScrollDownAndBackTop,
   resolveChromeConfig,
   waitRandomDelay,
