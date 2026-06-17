@@ -536,6 +536,12 @@ async function switchModelTier(tierName,campaignId){
 if(modelSwitchStopBtn){
   modelSwitchStopBtn.addEventListener('click',()=>{
     const tierName=compact(modelTierSelectCtrl?.value);
+    const tier=state.modelTier?.tiers?.find(t=>t.name===tierName);
+    if(tier&&!tier.available&&tier.name!=='table'){
+      setMainStatus('error','TIER NOT CONFIGURED');
+      rawOutput.textContent=j({error:`${tier.label||tierName} is not configured. Set OPENAI_OSS_MODEL and OPENAI_OSS_API_KEY in .env and restart.`});
+      return;
+    }
     const cid=compact(state.campaign?.id);
     switchModelTier(tierName,cid||undefined);
   });

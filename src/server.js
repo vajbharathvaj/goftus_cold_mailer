@@ -112,18 +112,20 @@ function buildCascadeClient() {
       costPer1kTokens: 0.00015,
     });
   }
-  const ossModel = process.env.OPENAI_OSS_MODEL;
-  const ossKey = process.env.OPENAI_OSS_API_KEY || primaryKey;
-  const ossBaseUrl = process.env.OPENAI_OSS_BASE_URL;
-  if (ossModel && ossKey) {
-    tiers.push({
-      name: "secondary",
-      label: `OSS ${ossModel}`,
-      model: ossModel,
-      client: new OpenAIClient({ apiKey: ossKey, model: ossModel, baseUrl: ossBaseUrl, timeoutMs: 120000 }),
-      costPer1kTokens: 0.0001,
-    });
-  }
+  const ossModel = compact(process.env.OPENAI_OSS_MODEL);
+  const ossKey = compact(process.env.OPENAI_OSS_API_KEY) || primaryKey;
+  const ossBaseUrl = compact(process.env.OPENAI_OSS_BASE_URL);
+  // Secondary is always present so the UI can display and switch to it;
+  // client is null when OSS model is not configured (falls through to table behaviour).
+  tiers.push({
+    name: "secondary",
+    label: ossModel ? `OSS ${ossModel}` : "OSS Secondary",
+    model: ossModel || "",
+    client: (ossModel && ossKey)
+      ? new OpenAIClient({ apiKey: ossKey, model: ossModel, baseUrl: ossBaseUrl || undefined, timeoutMs: 120000 })
+      : null,
+    costPer1kTokens: 0.0001,
+  });
   tiers.push({ name: "table", label: "Table Engine", model: "", client: null, costPer1kTokens: 0 });
   return new CascadeClient({ tiers });
 }
