@@ -115,16 +115,38 @@ function buildCascadeClient() {
   const ossModel = compact(process.env.OPENAI_OSS_MODEL);
   const ossKey = compact(process.env.OPENAI_OSS_API_KEY) || primaryKey;
   const ossBaseUrl = compact(process.env.OPENAI_OSS_BASE_URL);
+  const ossUseOllama = ["1", "true", "yes", "on"].includes(
+    String(process.env.OPENAI_OSS_USE_OLLAMA || "").trim().toLowerCase()
+  );
+
+  let ossClient = null;
+  let ossLabel = "OSS Secondary";
+  let ossModelLabel = "";
+  if (ossUseOllama) {
+    // Use local Ollama as the secondary tier — no extra cost, no cloud key needed.
+    const ollamaModel = ossModel || config.ollamaModel;
+    ossClient = new OllamaClient({
+      baseUrl: ossBaseUrl || config.ollamaBaseUrl,
+      model: ollamaModel,
+      timeoutMs: 120000,
+      generationOptions: config.ollamaGeneration,
+    });
+    ossLabel = `Ollama ${ollamaModel}`;
+    ossModelLabel = ollamaModel;
+  } else if (ossModel && ossKey) {
+    ossClient = new OpenAIClient({ apiKey: ossKey, model: ossModel, baseUrl: ossBaseUrl || undefined, timeoutMs: 120000 });
+    ossLabel = `OSS ${ossModel}`;
+    ossModelLabel = ossModel;
+  }
+
   // Secondary is always present so the UI can display and switch to it;
-  // client is null when OSS model is not configured (falls through to table behaviour).
+  // client is null when not configured (falls through to table behaviour).
   tiers.push({
     name: "secondary",
-    label: ossModel ? `OSS ${ossModel}` : "OSS Secondary",
-    model: ossModel || "",
-    client: (ossModel && ossKey)
-      ? new OpenAIClient({ apiKey: ossKey, model: ossModel, baseUrl: ossBaseUrl || undefined, timeoutMs: 120000 })
-      : null,
-    costPer1kTokens: 0.0001,
+    label: ossLabel,
+    model: ossModelLabel,
+    client: ossClient,
+    costPer1kTokens: ossUseOllama ? 0 : 0.0001,
   });
   tiers.push({ name: "table", label: "Table Engine", model: "", client: null, costPer1kTokens: 0 });
   return new CascadeClient({ tiers });
