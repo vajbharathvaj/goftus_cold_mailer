@@ -134,7 +134,7 @@ function buildCascadeClient() {
     ossLabel = `Ollama ${ollamaModel}`;
     ossModelLabel = ollamaModel;
   } else if (ossModel && ossKey) {
-    ossClient = new OpenAIClient({ apiKey: ossKey, model: ossModel, baseUrl: ossBaseUrl || undefined, timeoutMs: 120000 });
+    ossClient = new OpenAIClient({ apiKey: ossKey, model: ossModel, baseUrl: ossBaseUrl || undefined, timeoutMs: 180000 });
     ossLabel = `OSS ${ossModel}`;
     ossModelLabel = ossModel;
   }
